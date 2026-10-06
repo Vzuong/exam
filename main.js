@@ -67,35 +67,18 @@ const state = {
 
 // DOM Elements Cache
 const elements = {
-  // Timer
-  timerWidget: document.getElementById('timerWidget'),
-  timerDisplay: document.getElementById('timerDisplay'),
-  btnStartTimer: document.getElementById('btnStartTimer'),
-  btnResetTimer: document.getElementById('btnResetTimer'),
-  iconTimerPlay: document.getElementById('iconTimerPlay'),
-  iconTimerPause: document.getElementById('iconTimerPause'),
-
   // Matrix
   matrixGrid: document.getElementById('matrixGrid'),
   matrixStats: document.getElementById('matrixStats'),
-  btnCopyAnswers: document.getElementById('btnCopyAnswers'),
 
-  // Mode Bar & Profile Pickers
+  // Mode Bar
   btnModeLookup: document.getElementById('btnModeLookup'),
   btnModeCrossCheck: document.getElementById('btnModeCrossCheck'),
-  panelLookupProfiles: document.getElementById('panelLookupProfiles'),
-  panelCrossProfiles: document.getElementById('panelCrossProfiles'),
-  selectLookupProfile: document.getElementById('selectLookupProfile'),
-  badgeLookupModel: document.getElementById('badgeLookupModel'),
-  selectCrossSolver: document.getElementById('selectCrossSolver'),
-  selectCrossVerifier: document.getElementById('selectCrossVerifier'),
-  selectCrossArbitrator: document.getElementById('selectCrossArbitrator'),
 
   // Result Status Banner
   resultStatusBanner: document.getElementById('resultStatusBanner'),
   bannerModeText: document.getElementById('bannerModeText'),
   bannerRequestStats: document.getElementById('bannerRequestStats'),
-  bannerProfilesRow: document.getElementById('bannerProfilesRow'),
   bannerProgressText: document.getElementById('bannerProgressText'),
 
   // Upload & Actions
@@ -103,8 +86,6 @@ const elements = {
   fileInput: document.getElementById('fileInput'),
   btnSolveAll: document.getElementById('btnSolveAll'),
   btnSortQuestions: document.getElementById('btnSortQuestions'),
-  btnLoadDemo: document.getElementById('btnLoadDemo'),
-  btnExportReport: document.getElementById('btnExportReport'),
   btnRetryFailed: document.getElementById('btnRetryFailed'),
   btnClearAll: document.getElementById('btnClearAll'),
   totalQuestionsCount: document.getElementById('totalQuestionsCount'),
@@ -113,8 +94,6 @@ const elements = {
   // Mobile Bottom Bar
   mobileBottomBar: document.getElementById('mobileBottomBar'),
   btnMobileSolve: document.getElementById('btnMobileSolve'),
-  btnMobileCopyAll: document.getElementById('btnMobileCopyAll'),
-  btnMobileDemo: document.getElementById('btnMobileDemo'),
   mobileQuestionCount: document.getElementById('mobileQuestionCount'),
 
   // Settings Modal & Profiles Manager
@@ -147,16 +126,6 @@ const elements = {
   zoomModalTitle: document.getElementById('zoomModalTitle'),
   btnCloseZoom: document.getElementById('btnCloseZoom'),
 
-  // Export Modal
-  exportModal: document.getElementById('exportModal'),
-  btnCloseExport: document.getElementById('btnCloseExport'),
-  btnCopyInline: document.getElementById('btnCopyInline'),
-  btnCopyLettersOnly: document.getElementById('btnCopyLettersOnly'),
-  btnCopyDetailed: document.getElementById('btnCopyDetailed'),
-  exportPreviewText: document.getElementById('exportPreviewText'),
-  btnPrintPdf: document.getElementById('btnPrintPdf'),
-  btnDownloadTxt: document.getElementById('btnDownloadTxt'),
-
   // Toast
   toast: document.getElementById('toast'),
   activeModeDisplay: document.getElementById('activeModeDisplay')
@@ -168,7 +137,6 @@ const elements = {
 function init() {
   loadProfilesAndSettings();
   setupEventListeners();
-  updateTimerDisplay();
   renderQuestions();
   renderMatrix();
   updateRequestStatsDisplay();
@@ -310,55 +278,22 @@ function updateHeaderBadges() {
 
 function updateModeUI() {
   if (state.mode === 'lookup') {
-    elements.btnModeLookup.classList.add('active');
-    elements.btnModeCrossCheck.classList.remove('active');
-    elements.panelLookupProfiles.style.display = 'block';
-    elements.panelCrossProfiles.style.display = 'none';
+    if (elements.btnModeLookup) elements.btnModeLookup.classList.add('active');
+    if (elements.btnModeCrossCheck) elements.btnModeCrossCheck.classList.remove('active');
   } else {
-    elements.btnModeLookup.classList.remove('active');
-    elements.btnModeCrossCheck.classList.add('active');
-    elements.panelLookupProfiles.style.display = 'none';
-    elements.panelCrossProfiles.style.display = 'block';
+    if (elements.btnModeLookup) elements.btnModeLookup.classList.remove('active');
+    if (elements.btnModeCrossCheck) elements.btnModeCrossCheck.classList.add('active');
   }
   updateHeaderBadges();
   updateResultBanner();
 }
 
 function renderProfilePickers() {
-  const optionsHtml = state.profiles.map(p => {
-    const statusDot = p.status === 'ready' ? '🟢' : p.status === 'rate_limited' ? '🟡' : p.status === 'error' ? '🔴' : '⚪';
-    const keyHint = p.apiKey ? maskApiKey(p.apiKey) : 'Chưa có key';
-    return `<option value="${p.id}">${statusDot} ${escapeHtml(p.name)} (${p.model.replace(/^gemini-/, '')} • ${keyHint})</option>`;
-  }).join('');
-
-  // 1. Lookup Picker
-  if (elements.selectLookupProfile) {
-    elements.selectLookupProfile.innerHTML = optionsHtml || '<option value="">(Chưa có profile)</option>';
-    if (state.lookupProfileId) elements.selectLookupProfile.value = state.lookupProfileId;
-    const current = getProfileById(elements.selectLookupProfile.value);
-    if (elements.badgeLookupModel && current) {
-      elements.badgeLookupModel.textContent = `${current.model} • ${current.thinkingLevel.toUpperCase()}`;
-    }
-  }
-
-  // 2. Cross Solver (Pass 1)
-  if (elements.selectCrossSolver) {
-    elements.selectCrossSolver.innerHTML = optionsHtml || '<option value="">(Chưa có profile)</option>';
-    if (state.solverProfileId) elements.selectCrossSolver.value = state.solverProfileId;
-  }
-
-  // 3. Cross Verifier (Pass 2)
-  if (elements.selectCrossVerifier) {
-    elements.selectCrossVerifier.innerHTML = optionsHtml || '<option value="">(Chưa có profile)</option>';
-    if (state.verifierProfileId) elements.selectCrossVerifier.value = state.verifierProfileId;
-  }
-
-  // 4. Cross Arbitrator (Pass 3)
-  if (elements.selectCrossArbitrator) {
-    const arbitratorOptions = '<option value="">-- Không dùng (Báo lệch & cho bấm kiểm tra lại) --</option>' + optionsHtml;
-    elements.selectCrossArbitrator.innerHTML = arbitratorOptions;
-    elements.selectCrossArbitrator.value = state.arbitratorProfileId || '';
-  }
+  const profileIds = state.profiles.map(p => p.id);
+  state.lookupProfileId = state.lookupProfileId && profileIds.includes(state.lookupProfileId) ? state.lookupProfileId : (profileIds[0] || '');
+  state.solverProfileId = state.solverProfileId && profileIds.includes(state.solverProfileId) ? state.solverProfileId : (profileIds[0] || '');
+  state.verifierProfileId = state.verifierProfileId && profileIds.includes(state.verifierProfileId) ? state.verifierProfileId : (profileIds[1] || profileIds[0] || '');
+  state.arbitratorProfileId = state.arbitratorProfileId && profileIds.includes(state.arbitratorProfileId) ? state.arbitratorProfileId : (profileIds[2] || '');
 }
 
 function renderProfilesList() {
@@ -380,11 +315,19 @@ function renderProfilesList() {
     const s = statusMap[p.status] || statusMap.untested;
     const lastCheckedText = p.lastChecked ? `Kiểm tra: ${formatTimestamp(p.lastChecked)}` : 'Chưa kiểm tra';
 
+    const roleBadges = [
+      '<span class="profile-role-badge badge-role-1" style="font-size: 0.68rem; padding: 2px 7px; border-radius: 99px; background: rgba(66, 133, 244, 0.2); color: #8ab4f8; font-weight: 600;">👑 1. Giải Chính</span>',
+      '<span class="profile-role-badge badge-role-2" style="font-size: 0.68rem; padding: 2px 7px; border-radius: 99px; background: rgba(155, 114, 203, 0.2); color: #c58af9; font-weight: 600;">🔍 2. Kiểm Tra Chéo</span>',
+      '<span class="profile-role-badge badge-role-3" style="font-size: 0.68rem; padding: 2px 7px; border-radius: 99px; background: rgba(217, 101, 112, 0.2); color: #f28b82; font-weight: 600;">⚖ 3. Phân Xử</span>'
+    ];
+    const roleBadge = roleBadges[index] || `<span class="profile-role-badge badge-role-sub" style="font-size: 0.68rem; padding: 2px 7px; border-radius: 99px; background: rgba(255,255,255,0.08); color: var(--text-dim);">Dự phòng ${index + 1}</span>`;
+
     return `
       <div class="profile-item-card" id="profile-card-${p.id}">
         <div class="profile-card-top">
-          <div class="profile-name-tag">
+          <div class="profile-name-tag" style="display: flex; align-items: center; gap: 8px;">
             <span>👤 ${escapeHtml(p.name)}</span>
+            ${roleBadge}
           </div>
           <span class="profile-status-badge ${s.cls}">${s.label}</span>
         </div>
@@ -641,32 +584,15 @@ function updateResultBanner() {
   }
   elements.resultStatusBanner.classList.remove('hidden');
 
-  if (state.mode === 'lookup') {
-    elements.bannerModeText.textContent = 'Chế độ: ✓ Chỉ tra (1 Lượt)';
-    const p = getProfileById(state.lookupProfileId);
-    elements.bannerProfilesRow.innerHTML = `
-      <span class="banner-profile-chip">API Giải: <b>${escapeHtml(p?.name || 'Chưa chọn')}</b> (${p?.model || '3.8 Flash'})</span>
-    `;
-  } else {
-    elements.bannerModeText.textContent = 'Chế độ: ✓ Kiểm tra chéo (2 Lượt Độc Lập)';
-    const p1 = getProfileById(state.solverProfileId);
-    const p2 = getProfileById(state.verifierProfileId);
-    const p3 = getProfileById(state.arbitratorProfileId);
-
-    let html = `
-      <span class="banner-profile-chip">1. Giải: <b>${escapeHtml(p1?.name || 'Tài khoản 1')}</b> (${p1?.model || '3.8 Flash'})</span>
-      <span class="banner-profile-chip">2. Kiểm tra: <b>${escapeHtml(p2?.name || 'Tài khoản 2')}</b> (${p2?.model || '3.8 Flash'})</span>
-    `;
-    if (p3) {
-      html += `<span class="banner-profile-chip">3. Phân xử: <b>${escapeHtml(p3.name)}</b> (${p3.model})</span>`;
-    } else {
-      html += `<span class="banner-profile-chip" style="opacity: 0.7;">3. Phân xử: Không cấu hình (Kiểm tra lại câu lẻ)</span>`;
-    }
-    elements.bannerProfilesRow.innerHTML = html;
+  if (elements.bannerModeText) {
+    elements.bannerModeText.textContent = state.mode === 'lookup' ? 'Chế độ: Chỉ tra' : 'Chế độ: Kiểm tra chéo';
   }
-
-  elements.bannerProgressText.textContent = state.currentProcessStage;
-  elements.bannerRequestStats.textContent = `Request đã dùng: ${state.requestStats.run}`;
+  if (elements.bannerProgressText) {
+    elements.bannerProgressText.textContent = state.currentProcessStage;
+  }
+  if (elements.bannerRequestStats) {
+    elements.bannerRequestStats.textContent = `Request đã dùng: ${state.requestStats.run}`;
+  }
 }
 
 function updateRequestStatsDisplay() {
@@ -1169,7 +1095,6 @@ async function solveAllQuestions() {
     return;
   }
 
-  if (!state.timer.isRunning) toggleTimer();
   elements.btnSolveAll.disabled = true;
   if (elements.btnMobileSolve) elements.btnMobileSolve.disabled = true;
 
@@ -1594,7 +1519,6 @@ function createQuestionCardElement(q, index) {
       </div>
       <div class="card-right-actions">
         <span class="card-status-pill status-pill-${q.status}">${statusLabels[q.status] || q.status}</span>
-        <button class="btn-card-copy btn-quick-copy" title="Copy câu này">📋</button>
       </div>
     </div>
 
@@ -1655,14 +1579,7 @@ function createQuestionCardElement(q, index) {
     elements.imageZoomModal.classList.remove('hidden');
   });
 
-  // Copy single question in exact 2-line format
-  const btnQuickCopy = card.querySelector('.btn-quick-copy');
-  btnQuickCopy.addEventListener('click', () => {
-    const singleText = `${displayQ}\n${displayA}`;
-    navigator.clipboard.writeText(singleText).then(() => {
-      showToast(`📋 Đã copy Câu ${index + 1}!`, 'success');
-    });
-  });
+
 
   // Re-resolve
   const btnReSolve = card.querySelector('.btn-re-solve');
@@ -2065,10 +1982,6 @@ function delay(ms) {
 // 16. Event Listeners Setup
 // ==========================================
 function setupEventListeners() {
-  // Timer Controls
-  elements.btnStartTimer.addEventListener('click', toggleTimer);
-  elements.btnResetTimer.addEventListener('click', resetTimer);
-
   // Settings Modal Controls
   elements.btnOpenSettings.addEventListener('click', () => {
     renderProfilesList();
@@ -2116,58 +2029,11 @@ function setupEventListeners() {
     updateModeUI();
   });
 
-  // Profile Selectors Change in Mode Bar
-  if (elements.selectLookupProfile) {
-    elements.selectLookupProfile.addEventListener('change', () => {
-      state.lookupProfileId = elements.selectLookupProfile.value;
-      const p = getProfileById(state.lookupProfileId);
-      if (elements.badgeLookupModel && p) {
-        elements.badgeLookupModel.textContent = `${p.model} • ${p.thinkingLevel.toUpperCase()}`;
-      }
-      saveModeAndAssignments();
-    });
-  }
-
-  if (elements.selectCrossSolver) {
-    elements.selectCrossSolver.addEventListener('change', () => {
-      state.solverProfileId = elements.selectCrossSolver.value;
-      saveModeAndAssignments();
-    });
-  }
-
-  if (elements.selectCrossVerifier) {
-    elements.selectCrossVerifier.addEventListener('change', () => {
-      state.verifierProfileId = elements.selectCrossVerifier.value;
-      saveModeAndAssignments();
-    });
-  }
-
-  if (elements.selectCrossArbitrator) {
-    elements.selectCrossArbitrator.addEventListener('change', () => {
-      state.arbitratorProfileId = elements.selectCrossArbitrator.value;
-      saveModeAndAssignments();
-    });
-  }
-
   // Zoom Modal
   elements.btnCloseZoom.addEventListener('click', () => elements.imageZoomModal.classList.add('hidden'));
   elements.imageZoomModal.addEventListener('click', (e) => {
     if (e.target === elements.imageZoomModal) elements.imageZoomModal.classList.add('hidden');
   });
-
-  // Export Modal
-  if (elements.btnExportReport) elements.btnExportReport.addEventListener('click', openExportModal);
-  if (elements.btnCloseExport) elements.btnCloseExport.addEventListener('click', () => elements.exportModal.classList.add('hidden'));
-  if (elements.exportModal) {
-    elements.exportModal.addEventListener('click', (e) => {
-      if (e.target === elements.exportModal) elements.exportModal.classList.add('hidden');
-    });
-  }
-  if (elements.btnCopyInline) elements.btnCopyInline.addEventListener('click', copyInlineFormat);
-  if (elements.btnCopyLettersOnly) elements.btnCopyLettersOnly.addEventListener('click', copyLettersOnly);
-  if (elements.btnCopyDetailed) elements.btnCopyDetailed.addEventListener('click', copyAllAnswers);
-  if (elements.btnPrintPdf) elements.btnPrintPdf.addEventListener('click', () => window.print());
-  if (elements.btnDownloadTxt) elements.btnDownloadTxt.addEventListener('click', downloadTxtFile);
 
   // Drag and Drop Upload
   elements.dropZone.addEventListener('dragover', (e) => {
@@ -2210,20 +2076,15 @@ function setupEventListeners() {
   elements.btnSortQuestions.addEventListener('click', sortQuestionsNatural);
   elements.btnRetryFailed.addEventListener('click', retryFailedQuestions);
   elements.btnClearAll.addEventListener('click', clearAllQuestions);
-  elements.btnCopyAnswers.addEventListener('click', copyAllAnswers);
-  if (elements.btnLoadDemo) elements.btnLoadDemo.addEventListener('click', loadDemoQuestions);
 
   // Mobile Bottom Bar Actions
   if (elements.btnMobileSolve) elements.btnMobileSolve.addEventListener('click', solveAllQuestions);
-  if (elements.btnMobileCopyAll) elements.btnMobileCopyAll.addEventListener('click', copyAllAnswers);
-  if (elements.btnMobileDemo) elements.btnMobileDemo.addEventListener('click', loadDemoQuestions);
 
   // Escape Key
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       elements.settingsModal.classList.add('hidden');
       elements.imageZoomModal.classList.add('hidden');
-      if (elements.exportModal) elements.exportModal.classList.add('hidden');
     }
   });
 }
