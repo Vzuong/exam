@@ -1,23 +1,62 @@
 /**
- * FastExam AI - Mobile-First SEB Exam Solver
- * Optimized for mobile phone screens & Safe Exam Browser (SEB) exams
- * Format:
- * Câu 1: [Nội dung câu hỏi]
- * A. [Nội dung câu trả lời]
- * (Hoặc không có số câu: [Câu hỏi] \n A. [Câu trả lời])
+ * FastExam AI v2.0 - Mobile-First SEB Exam Solver
+ * - Multi-API Profile Management (BYOK per account/project)
+ * - 2 Modes: [ Chỉ Tra ] & [ Kiểm Tra Chéo ]
+ * - Lượt 1 & Lượt 2 giải hoàn toàn độc lập từ ảnh gốc (Pass 2 independent)
+ * - Phân xử Lượt 3 cho câu lệch (Arbitration) hoặc Kiểm tra lại từng câu
+ * - Tự động nén thích ứng & chia batch cho tối đa 15 ảnh
+ * - Định dạng chuẩn SEB:
+ *     Câu 1: [Nội dung câu hỏi]
+ *     B. [Nội dung đáp án đúng]
  */
 
-// Application State
+// ==========================================
+// 1. Application State & Storage
+// ==========================================
+const DEFAULT_MODELS = [
+  { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash (Khuyên dùng)' },
+  { id: 'gemini-3.7-flash', name: 'Gemini 3.7 Flash' },
+  { id: 'gemini-3.6-flash', name: 'Gemini 3.6 Flash' },
+  { id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash' },
+  { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
+  { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash' }
+];
+
 const state = {
   questions: [],
-  apiKey: '',
-  model: 'gemini-3.8-flash',
-  thinkingLevel: 'high',
-  doubleCheck: true,
-  requestStats: { run: 0, firstPass: 0, secondPass: 0, arbitration: 0, retries: 0, batches: 0, lastStatus: '' },
+
+  // Multi API Profiles
+  profiles: [],
+
+  // Active Mode: 'lookup' (Chỉ tra) | 'cross_check' (Kiểm tra chéo)
+  mode: 'cross_check',
+
+  // Profile assignments by ID
+  lookupProfileId: '',
+  solverProfileId: '',
+  verifierProfileId: '',
+  arbitratorProfileId: '', // '' = Không có (người dùng tự bấm kiểm tra lại)
+
+  // Realtime Execution State
+  currentProcessStage: 'Sẵn sàng',
+
+  // Request Statistics
+  requestStats: {
+    run: 0,
+    lookupPass: 0,
+    firstPass: 0,
+    secondPass: 0,
+    arbitration: 0,
+    singleRechecks: 0,
+    retries: 0,
+    batches: 0,
+    lastStatus: ''
+  },
+
   maxImagesPerRequest: 15,
   maxInlineRequestBytes: 18_500_000,
   promptPreset: 'multiple_choice_only',
+
   timer: {
     totalSeconds: 15 * 60,
     remainingSeconds: 15 * 60,
@@ -26,7 +65,7 @@ const state = {
   }
 };
 
-// DOM Elements
+// DOM Elements Cache
 const elements = {
   // Timer
   timerWidget: document.getElementById('timerWidget'),
@@ -39,9 +78,25 @@ const elements = {
   // Matrix
   matrixGrid: document.getElementById('matrixGrid'),
   matrixStats: document.getElementById('matrixStats'),
-  matrixProgressFill: document.getElementById('matrixProgressFill'),
   btnCopyAnswers: document.getElementById('btnCopyAnswers'),
-  activeModeDisplay: document.getElementById('activeModeDisplay'),
+
+  // Mode Bar & Profile Pickers
+  btnModeLookup: document.getElementById('btnModeLookup'),
+  btnModeCrossCheck: document.getElementById('btnModeCrossCheck'),
+  panelLookupProfiles: document.getElementById('panelLookupProfiles'),
+  panelCrossProfiles: document.getElementById('panelCrossProfiles'),
+  selectLookupProfile: document.getElementById('selectLookupProfile'),
+  badgeLookupModel: document.getElementById('badgeLookupModel'),
+  selectCrossSolver: document.getElementById('selectCrossSolver'),
+  selectCrossVerifier: document.getElementById('selectCrossVerifier'),
+  selectCrossArbitrator: document.getElementById('selectCrossArbitrator'),
+
+  // Result Status Banner
+  resultStatusBanner: document.getElementById('resultStatusBanner'),
+  bannerModeText: document.getElementById('bannerModeText'),
+  bannerRequestStats: document.getElementById('bannerRequestStats'),
+  bannerProfilesRow: document.getElementById('bannerProfilesRow'),
+  bannerProgressText: document.getElementById('bannerProgressText'),
 
   // Upload & Actions
   dropZone: document.getElementById('dropZone'),
@@ -62,19 +117,29 @@ const elements = {
   btnMobileDemo: document.getElementById('btnMobileDemo'),
   mobileQuestionCount: document.getElementById('mobileQuestionCount'),
 
-  // Settings Modal
+  // Settings Modal & Profiles Manager
   btnOpenSettings: document.getElementById('btnOpenSettings'),
   btnCloseSettings: document.getElementById('btnCloseSettings'),
+  btnCloseSettingsModal: document.getElementById('btnCloseSettingsModal'),
   settingsModal: document.getElementById('settingsModal'),
-  apiKeyInput: document.getElementById('apiKeyInput'),
   apiKeyStatusBadge: document.getElementById('apiKeyStatusBadge'),
-  modelSelect: document.getElementById('modelSelect'),
-  customModelInput: document.getElementById('customModelInput'),
-  thinkingLevelSelect: document.getElementById('thinkingLevelSelect'),
-  requestStatsDisplay: document.getElementById('requestStatsDisplay'),
   activeModelBadge: document.getElementById('activeModelBadge'),
-  promptPresetSelect: document.getElementById('promptPresetSelect'),
-  btnSaveSettings: document.getElementById('btnSaveSettings'),
+  profilesListContainer: document.getElementById('profilesListContainer'),
+  btnAddNewProfile: document.getElementById('btnAddNewProfile'),
+  profileFormBox: document.getElementById('profileFormBox'),
+  profileFormTitle: document.getElementById('profileFormTitle'),
+  editProfileId: document.getElementById('editProfileId'),
+  inputProfileName: document.getElementById('inputProfileName'),
+  inputProfileKey: document.getElementById('inputProfileKey'),
+  btnToggleKeyVisibility: document.getElementById('btnToggleKeyVisibility'),
+  inputProfileModel: document.getElementById('inputProfileModel'),
+  inputCustomModel: document.getElementById('inputCustomModel'),
+  inputProfileThinking: document.getElementById('inputProfileThinking'),
+  btnTestThisKey: document.getElementById('btnTestThisKey'),
+  btnCancelProfile: document.getElementById('btnCancelProfile'),
+  btnCancelProfileForm: document.getElementById('btnCancelProfileForm'),
+  btnSaveProfileItem: document.getElementById('btnSaveProfileItem'),
+  testKeyFeedback: document.getElementById('testKeyFeedback'),
 
   // Zoom Modal
   imageZoomModal: document.getElementById('imageZoomModal'),
@@ -93,482 +158,690 @@ const elements = {
   btnDownloadTxt: document.getElementById('btnDownloadTxt'),
 
   // Toast
-  toast: document.getElementById('toast')
+  toast: document.getElementById('toast'),
+  activeModeDisplay: document.getElementById('activeModeDisplay')
 };
 
 // ==========================================
-// 1. Initialization & Local Storage
+// 2. Initialization & Profile Persistence
 // ==========================================
 function init() {
-  loadSettings();
+  loadProfilesAndSettings();
   setupEventListeners();
   updateTimerDisplay();
   renderQuestions();
   renderMatrix();
   updateRequestStatsDisplay();
+  updateModeUI();
 }
 
-async function loadSettings() {
+function createDefaultProfiles() {
+  return [
+    {
+      id: 'prof_' + Date.now() + '_1',
+      name: 'Tài khoản chính',
+      apiKey: '',
+      model: 'gemini-3.8-flash',
+      thinkingLevel: 'high',
+      status: 'untested', // 'ready' | 'rate_limited' | 'error' | 'untested'
+      lastChecked: null,
+      lastError: null,
+      availableModels: []
+    },
+    {
+      id: 'prof_' + (Date.now() + 1) + '_2',
+      name: 'Tài khoản phụ 1',
+      apiKey: '',
+      model: 'gemini-3.8-flash',
+      thinkingLevel: 'high',
+      status: 'untested',
+      lastChecked: null,
+      lastError: null,
+      availableModels: []
+    }
+  ];
+}
+
+function loadProfilesAndSettings() {
   try {
-    const savedKey = localStorage.getItem('fastexam_api_key') || '';
-    const savedModel = localStorage.getItem('fastexam_model') || 'gemini-3.8-flash';
-    const savedThinking = localStorage.getItem('fastexam_thinking_level') || 'high';
-
-    state.apiKey = savedKey.trim();
-    state.model = savedModel.trim() || 'gemini-3.8-flash';
-    state.thinkingLevel = ['low', 'medium', 'high'].includes(savedThinking) ? savedThinking : 'high';
-
-    elements.apiKeyInput.value = state.apiKey;
-    if (elements.thinkingLevelSelect) elements.thinkingLevelSelect.value = state.thinkingLevel;
-
-    const exists = Array.from(elements.modelSelect.options).some(opt => opt.value === state.model);
-    if (exists) {
-      elements.modelSelect.value = state.model;
-    } else {
-      elements.modelSelect.value = 'custom';
-      if (elements.customModelInput) {
-        elements.customModelInput.value = state.model;
-        elements.customModelInput.classList.remove('hidden');
+    // 1. Load Profiles
+    const savedProfiles = localStorage.getItem('fastexam_profiles');
+    if (savedProfiles) {
+      try {
+        state.profiles = JSON.parse(savedProfiles);
+      } catch (_) {
+        state.profiles = [];
       }
     }
 
-    const savedPreset = localStorage.getItem('fastexam_preset');
-    if (savedPreset) {
-      state.promptPreset = savedPreset;
-      if (elements.promptPresetSelect) elements.promptPresetSelect.value = savedPreset;
+    // Migrate from legacy single-key storage if needed
+    if (!state.profiles || state.profiles.length === 0) {
+      const legacyKey = (localStorage.getItem('fastexam_api_key') || '').trim();
+      const legacyModel = (localStorage.getItem('fastexam_model') || 'gemini-3.8-flash').trim();
+      const legacyThinking = localStorage.getItem('fastexam_thinking_level') || 'high';
+
+      const defaults = createDefaultProfiles();
+      if (legacyKey) {
+        defaults[0].apiKey = legacyKey;
+        defaults[0].model = legacyModel;
+        defaults[0].thinkingLevel = ['low', 'medium', 'high'].includes(legacyThinking) ? legacyThinking : 'high';
+      }
+      state.profiles = defaults;
+      saveProfiles();
     }
 
-    updateApiKeyStatus();
-    updateModeDisplay();
+    // 2. Load Selected Mode
+    const savedMode = localStorage.getItem('fastexam_mode');
+    state.mode = (savedMode === 'lookup' || savedMode === 'cross_check') ? savedMode : 'cross_check';
+
+    // 3. Load Profile Assignments
+    const savedLookup = localStorage.getItem('fastexam_lookup_profile');
+    const savedSolver = localStorage.getItem('fastexam_solver_profile');
+    const savedVerifier = localStorage.getItem('fastexam_verifier_profile');
+    const savedArbitrator = localStorage.getItem('fastexam_arbitrator_profile');
+
+    const profileIds = state.profiles.map(p => p.id);
+    state.lookupProfileId = profileIds.includes(savedLookup) ? savedLookup : (profileIds[0] || '');
+    state.solverProfileId = profileIds.includes(savedSolver) ? savedSolver : (profileIds[0] || '');
+    state.verifierProfileId = profileIds.includes(savedVerifier) ? savedVerifier : (profileIds[1] || profileIds[0] || '');
+    state.arbitratorProfileId = profileIds.includes(savedArbitrator) ? savedArbitrator : '';
+
+    renderProfilesList();
+    renderProfilePickers();
+    updateHeaderBadges();
   } catch (err) {
-    console.warn('Lỗi đọc settings:', err);
+    console.warn('Lỗi đọc cấu hình từ localStorage:', err);
   }
 }
 
-function saveSettings() {
-  const key = (elements.apiKeyInput.value || '').trim();
-  const model = elements.modelSelect.value === 'custom'
-    ? (elements.customModelInput.value || '').trim()
-    : elements.modelSelect.value;
-  const thinkingLevel = elements.thinkingLevelSelect?.value || 'high';
-
-  if (!key) {
-    updateApiKeyStatus();
-    showToast('Vui lòng nhập Gemini API Key của bạn.', 'error');
-    return;
-  }
-
-  state.apiKey = key;
-  state.model = model || 'gemini-3.8-flash';
-  state.thinkingLevel = ['low', 'medium', 'high'].includes(thinkingLevel) ? thinkingLevel : 'high';
-
-  localStorage.setItem('fastexam_api_key', state.apiKey);
-  localStorage.setItem('fastexam_model', state.model);
-  localStorage.setItem('fastexam_thinking_level', state.thinkingLevel);
-  if (elements.promptPresetSelect) {
-    state.promptPreset = elements.promptPresetSelect.value;
-    localStorage.setItem('fastexam_preset', state.promptPreset);
-  }
-
-  updateApiKeyStatus();
-  updateModeDisplay();
-  showToast(`Đã lưu cấu hình. Model: ${state.model}`, 'success');
-  elements.settingsModal.classList.add('hidden');
+function saveProfiles() {
+  localStorage.setItem('fastexam_profiles', JSON.stringify(state.profiles));
+  updateHeaderBadges();
+  renderProfilesList();
+  renderProfilePickers();
 }
 
-function updateApiKeyStatus() {
-  const hasKey = Boolean(state.apiKey && state.apiKey.trim());
-  elements.apiKeyStatusBadge.textContent = hasKey ? '1 Key cá nhân' : 'Chưa có Key';
-  elements.apiKeyStatusBadge.style.background = hasKey ? 'rgba(16, 185, 129, 0.2)' : 'rgba(244, 63, 94, 0.2)';
-  elements.apiKeyStatusBadge.style.color = hasKey ? '#34d399' : '#f87171';
+function saveModeAndAssignments() {
+  localStorage.setItem('fastexam_mode', state.mode);
+  localStorage.setItem('fastexam_lookup_profile', state.lookupProfileId);
+  localStorage.setItem('fastexam_solver_profile', state.solverProfileId);
+  localStorage.setItem('fastexam_verifier_profile', state.verifierProfileId);
+  localStorage.setItem('fastexam_arbitrator_profile', state.arbitratorProfileId);
+  updateHeaderBadges();
+  updateResultBanner();
 }
 
-function updateModeDisplay() {
-  const levelText = state.thinkingLevel === 'high' ? 'cao' : state.thinkingLevel === 'medium' ? 'vừa' : 'thấp';
-  elements.activeModeDisplay.textContent = state.doubleCheck
-    ? `📸 tối đa 15 ảnh/request • 🧠 suy luận ${levelText} • 🔎 đối soát + phân xử khi lệch`
-    : `📸 tối đa 15 ảnh/request • 🧠 suy luận ${levelText}`;
+function getProfileById(id) {
+  return state.profiles.find(p => p.id === id) || null;
+}
+
+function maskApiKey(key) {
+  if (!key) return '(Chưa nhập key)';
+  if (key.length <= 8) return '••••••••';
+  return '••••' + key.slice(-4);
+}
+
+function formatTimestamp(isoStr) {
+  if (!isoStr) return '';
+  const d = new Date(isoStr);
+  return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')} ${d.getDate()}/${d.getMonth() + 1}`;
+}
+
+// ==========================================
+// 3. Profiles UI & Picker Rendering
+// ==========================================
+function updateHeaderBadges() {
+  const activeProfilesCount = state.profiles.filter(p => Boolean(p.apiKey && p.apiKey.trim())).length;
+  if (elements.apiKeyStatusBadge) {
+    elements.apiKeyStatusBadge.textContent = `${activeProfilesCount}`;
+    elements.apiKeyStatusBadge.title = `${activeProfilesCount} API Profile đã nhập key`;
+  }
 
   if (elements.activeModelBadge) {
-    const shortName = state.model.replace(/^gemini-/, '');
-    elements.activeModelBadge.textContent = shortName;
+    if (state.mode === 'lookup') {
+      const prof = getProfileById(state.lookupProfileId);
+      elements.activeModelBadge.textContent = prof ? `${prof.model.replace(/^gemini-/, '')}` : 'Chỉ tra';
+    } else {
+      const p1 = getProfileById(state.solverProfileId);
+      elements.activeModelBadge.textContent = p1 ? `Chéo • ${p1.model.replace(/^gemini-/, '')}` : 'Kiểm tra chéo';
+    }
   }
-  updateRequestStatsDisplay();
 }
 
-// ==========================================
-// 2. Event Listeners
-// ==========================================
-function setupEventListeners() {
-  // Timer
-  elements.btnStartTimer.addEventListener('click', toggleTimer);
-  elements.btnResetTimer.addEventListener('click', resetTimer);
-
-  // Settings Modal
-  elements.btnOpenSettings.addEventListener('click', () => elements.settingsModal.classList.remove('hidden'));
-  elements.btnCloseSettings.addEventListener('click', () => elements.settingsModal.classList.add('hidden'));
-  elements.btnSaveSettings.addEventListener('click', saveSettings);
-  elements.settingsModal.addEventListener('click', (e) => {
-    if (e.target === elements.settingsModal) elements.settingsModal.classList.add('hidden');
-  });
-
-  if (elements.thinkingLevelSelect) {
-    elements.thinkingLevelSelect.addEventListener('change', () => {
-      state.thinkingLevel = elements.thinkingLevelSelect.value;
-      updateModeDisplay();
-    });
-  }
-
-  if (elements.modelSelect) {
-    elements.modelSelect.addEventListener('change', () => {
-      if (elements.modelSelect.value === 'custom') {
-        elements.customModelInput.classList.remove('hidden');
-        elements.customModelInput.focus();
-      } else {
-        elements.customModelInput.classList.add('hidden');
-      }
-    });
-  }
-
-  // Zoom Modal
-  elements.btnCloseZoom.addEventListener('click', () => elements.imageZoomModal.classList.add('hidden'));
-  elements.imageZoomModal.addEventListener('click', (e) => {
-    if (e.target === elements.imageZoomModal) elements.imageZoomModal.classList.add('hidden');
-  });
-
-  // Export Modal
-  if (elements.btnExportReport) {
-    elements.btnExportReport.addEventListener('click', openExportModal);
-  }
-  if (elements.btnCloseExport) {
-    elements.btnCloseExport.addEventListener('click', () => elements.exportModal.classList.add('hidden'));
-  }
-  if (elements.exportModal) {
-    elements.exportModal.addEventListener('click', (e) => {
-      if (e.target === elements.exportModal) elements.exportModal.classList.add('hidden');
-    });
-  }
-  if (elements.btnCopyInline) elements.btnCopyInline.addEventListener('click', copyInlineFormat);
-  if (elements.btnCopyLettersOnly) elements.btnCopyLettersOnly.addEventListener('click', copyLettersOnly);
-  if (elements.btnCopyDetailed) elements.btnCopyDetailed.addEventListener('click', copyAllAnswers);
-  if (elements.btnPrintPdf) elements.btnPrintPdf.addEventListener('click', () => window.print());
-  if (elements.btnDownloadTxt) elements.btnDownloadTxt.addEventListener('click', downloadTxtFile);
-
-  // Drag and Drop Upload
-  elements.dropZone.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    elements.dropZone.classList.add('dragover');
-  });
-  elements.dropZone.addEventListener('dragleave', () => elements.dropZone.classList.remove('dragover'));
-  elements.dropZone.addEventListener('drop', (e) => {
-    e.preventDefault();
-    elements.dropZone.classList.remove('dragover');
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      handleFiles(Array.from(e.dataTransfer.files));
-    }
-  });
-
-  elements.fileInput.addEventListener('change', (e) => {
-    if (e.target.files && e.target.files.length > 0) {
-      handleFiles(Array.from(e.target.files));
-      elements.fileInput.value = ''; // Reset for re-selection
-    }
-  });
-
-  // Paste from clipboard (Ctrl + V)
-  document.addEventListener('paste', (e) => {
-    const items = (e.clipboardData || e.originalEvent.clipboardData).items;
-    const pastedFiles = [];
-    for (let item of items) {
-      if (item.kind === 'file' && item.type.startsWith('image/')) {
-        const file = item.getAsFile();
-        pastedFiles.push(file);
-      }
-    }
-    if (pastedFiles.length > 0) {
-      handleFiles(pastedFiles, true);
-      showToast(`Đã dán ${pastedFiles.length} ảnh từ Clipboard!`, 'success');
-    }
-  });
-
-  // Toolbar Actions
-  elements.btnSolveAll.addEventListener('click', solveAllQuestions);
-  elements.btnSortQuestions.addEventListener('click', sortQuestionsNatural);
-  elements.btnRetryFailed.addEventListener('click', retryFailedQuestions);
-  elements.btnClearAll.addEventListener('click', clearAllQuestions);
-  elements.btnCopyAnswers.addEventListener('click', copyAllAnswers);
-  if (elements.btnLoadDemo) elements.btnLoadDemo.addEventListener('click', loadDemoQuestions);
-
-  // Mobile Bottom Bar Actions
-  if (elements.btnMobileSolve) elements.btnMobileSolve.addEventListener('click', solveAllQuestions);
-  if (elements.btnMobileCopyAll) elements.btnMobileCopyAll.addEventListener('click', copyAllAnswers);
-  if (elements.btnMobileDemo) elements.btnMobileDemo.addEventListener('click', loadDemoQuestions);
-
-  // Esc key to close modals
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      elements.settingsModal.classList.add('hidden');
-      elements.imageZoomModal.classList.add('hidden');
-      if (elements.exportModal) elements.exportModal.classList.add('hidden');
-    }
-  });
-}
-
-// ==========================================
-// 3. File Processing & Upload Handling
-// ==========================================
-async function handleFiles(files, isPasted = false) {
-  const imageFiles = files.filter(f => f.type.startsWith('image/'));
-  if (imageFiles.length === 0) {
-    showToast('Vui lòng chỉ tải lên tệp định dạng hình ảnh (PNG, JPG, JPEG, WEBP)!', 'error');
-    return;
-  }
-
-  const remainingSlots = state.maxImagesPerRequest - state.questions.length;
-  if (remainingSlots <= 0) {
-    showToast(`Đã đủ ${state.maxImagesPerRequest} ảnh cho một lượt. Hãy giải hoặc xóa bớt ảnh trước.`, 'error');
-    return;
-  }
-
-  const acceptedFiles = imageFiles.slice(0, remainingSlots);
-  if (imageFiles.length > acceptedFiles.length) {
-    showToast(`Mỗi lượt tối đa ${state.maxImagesPerRequest} ảnh. Chỉ thêm ${acceptedFiles.length} ảnh.`, 'error');
+function updateModeUI() {
+  if (state.mode === 'lookup') {
+    elements.btnModeLookup.classList.add('active');
+    elements.btnModeCrossCheck.classList.remove('active');
+    elements.panelLookupProfiles.style.display = 'block';
+    elements.panelCrossProfiles.style.display = 'none';
   } else {
-    showToast(`Đang tải lên và xử lý ${acceptedFiles.length} ảnh...`);
+    elements.btnModeLookup.classList.remove('active');
+    elements.btnModeCrossCheck.classList.add('active');
+    elements.panelLookupProfiles.style.display = 'none';
+    elements.panelCrossProfiles.style.display = 'block';
   }
+  updateHeaderBadges();
+  updateResultBanner();
+}
 
-  for (let file of acceptedFiles) {
-    try {
-      const prepared = await prepareImageForGemini(file);
-      const newQuestion = {
-        id: 'q_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
-        name: isPasted ? `Ảnh dán ${state.questions.length + 1}.jpg` : file.name,
-        base64: prepared.base64,
-        mimeType: prepared.mimeType,
-        dataUrl: prepared.dataUrl,
-        originalDataUrl: prepared.originalDataUrl || prepared.dataUrl,
-        status: 'idle', // 'idle' | 'loading' | 'done' | 'warning' | 'error'
-        questionLine: '',
-        answerLine: '',
-        letter: '?',
-        answer: null,
-        explanation: '',
-        confidence: 'high',
-        check1: null,
-        check2: null,
-        isImageOpen: false // Collapsible image preview for mobile compact view
-      };
+function renderProfilePickers() {
+  const optionsHtml = state.profiles.map(p => {
+    const statusDot = p.status === 'ready' ? '🟢' : p.status === 'rate_limited' ? '🟡' : p.status === 'error' ? '🔴' : '⚪';
+    const keyHint = p.apiKey ? maskApiKey(p.apiKey) : 'Chưa có key';
+    return `<option value="${p.id}">${statusDot} ${escapeHtml(p.name)} (${p.model.replace(/^gemini-/, '')} • ${keyHint})</option>`;
+  }).join('');
 
-      state.questions.push(newQuestion);
-    } catch (err) {
-      console.error('Lỗi khi đọc file ảnh:', err);
+  // 1. Lookup Picker
+  if (elements.selectLookupProfile) {
+    elements.selectLookupProfile.innerHTML = optionsHtml || '<option value="">(Chưa có profile)</option>';
+    if (state.lookupProfileId) elements.selectLookupProfile.value = state.lookupProfileId;
+    const current = getProfileById(elements.selectLookupProfile.value);
+    if (elements.badgeLookupModel && current) {
+      elements.badgeLookupModel.textContent = `${current.model} • ${current.thinkingLevel.toUpperCase()}`;
     }
   }
 
-  updateQuestionCounters();
-  renderQuestions();
-  renderMatrix();
-  showToast(`Đã thêm thành công! Tổng cộng: ${state.questions.length} câu hỏi.`);
+  // 2. Cross Solver (Pass 1)
+  if (elements.selectCrossSolver) {
+    elements.selectCrossSolver.innerHTML = optionsHtml || '<option value="">(Chưa có profile)</option>';
+    if (state.solverProfileId) elements.selectCrossSolver.value = state.solverProfileId;
+  }
+
+  // 3. Cross Verifier (Pass 2)
+  if (elements.selectCrossVerifier) {
+    elements.selectCrossVerifier.innerHTML = optionsHtml || '<option value="">(Chưa có profile)</option>';
+    if (state.verifierProfileId) elements.selectCrossVerifier.value = state.verifierProfileId;
+  }
+
+  // 4. Cross Arbitrator (Pass 3)
+  if (elements.selectCrossArbitrator) {
+    const arbitratorOptions = '<option value="">-- Không dùng (Báo lệch & cho bấm kiểm tra lại) --</option>' + optionsHtml;
+    elements.selectCrossArbitrator.innerHTML = arbitratorOptions;
+    elements.selectCrossArbitrator.value = state.arbitratorProfileId || '';
+  }
 }
 
-function readFileAsDataURL(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
+function renderProfilesList() {
+  const container = elements.profilesListContainer;
+  if (!container) return;
+
+  if (state.profiles.length === 0) {
+    container.innerHTML = '<div style="padding: 16px; text-align: center; color: var(--text-dim); font-size: 0.85rem;">Chưa có API Profile nào. Hãy bấm "+ Thêm Profile" để tạo mới!</div>';
+    return;
+  }
+
+  container.innerHTML = state.profiles.map((p, index) => {
+    const statusMap = {
+      ready: { label: '● Khả dụng (200 OK)', cls: 'status-ready' },
+      rate_limited: { label: '● Chạm hạn mức (429)', cls: 'status-rate_limited' },
+      error: { label: '● Lỗi xác thực / Quyền', cls: 'status-error' },
+      untested: { label: '● Chưa kiểm tra', cls: 'status-untested' }
+    };
+    const s = statusMap[p.status] || statusMap.untested;
+    const lastCheckedText = p.lastChecked ? `Kiểm tra: ${formatTimestamp(p.lastChecked)}` : 'Chưa kiểm tra';
+
+    return `
+      <div class="profile-item-card" id="profile-card-${p.id}">
+        <div class="profile-card-top">
+          <div class="profile-name-tag">
+            <span>👤 ${escapeHtml(p.name)}</span>
+          </div>
+          <span class="profile-status-badge ${s.cls}">${s.label}</span>
+        </div>
+
+        <div class="profile-card-details">
+          <span>Key: ${maskApiKey(p.apiKey)}</span>
+          <span>•</span>
+          <span>Model: ${escapeHtml(p.model)}</span>
+          <span>•</span>
+          <span>Thinking: ${p.thinkingLevel.toUpperCase()}</span>
+        </div>
+
+        ${p.lastError ? `<div class="profile-card-error">⚠ ${escapeHtml(p.lastError)}</div>` : ''}
+
+        <div class="profile-card-actions">
+          <span style="margin-right: auto; font-size: 0.72rem; color: var(--text-dim);">${lastCheckedText}</span>
+          <button type="button" class="btn-action-sm btn-test-profile" data-id="${p.id}" title="Gửi request test key">
+            🔍 Test API
+          </button>
+          <button type="button" class="btn-action-sm btn-edit-profile" data-id="${p.id}" title="Chỉnh sửa profile">
+            ✏ Sửa
+          </button>
+          <button type="button" class="btn-action-sm btn-action-danger btn-del-profile" data-id="${p.id}" title="Xóa profile">
+            🗑 Xóa
+          </button>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  // Attach card action listeners
+  container.querySelectorAll('.btn-test-profile').forEach(btn => {
+    btn.addEventListener('click', () => runProfileTest(btn.dataset.id));
+  });
+  container.querySelectorAll('.btn-edit-profile').forEach(btn => {
+    btn.addEventListener('click', () => openEditProfileForm(btn.dataset.id));
+  });
+  container.querySelectorAll('.btn-del-profile').forEach(btn => {
+    btn.addEventListener('click', () => deleteProfile(btn.dataset.id));
   });
 }
 
-async function prepareImageForGemini(file) {
-  const originalUrl = await readFileAsDataURL(file);
-  const image = await new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = reject;
-    img.src = originalUrl;
-  });
-
-  // Giữ đủ chi tiết để đọc chữ nhưng giảm mạnh kích thước ảnh camera.
-  const maxDimension = 1800;
-  const scale = Math.min(1, maxDimension / Math.max(image.naturalWidth, image.naturalHeight));
-  const width = Math.max(1, Math.round(image.naturalWidth * scale));
-  const height = Math.max(1, Math.round(image.naturalHeight * scale));
-
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext('2d', { alpha: false });
-  ctx.drawImage(image, 0, 0, width, height);
-
-  const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
-  return {
-    dataUrl,
-    originalDataUrl: dataUrl,
-    base64: dataUrl.split(',')[1],
-    mimeType: 'image/jpeg'
-  };
+function openAddProfileForm() {
+  elements.editProfileId.value = '';
+  elements.profileFormTitle.textContent = 'Thêm API Profile Mới';
+  elements.inputProfileName.value = `Tài khoản phụ ${state.profiles.length}`;
+  elements.inputProfileKey.value = '';
+  elements.inputProfileModel.value = 'gemini-3.8-flash';
+  elements.inputCustomModel.value = '';
+  elements.inputCustomModel.classList.add('hidden');
+  elements.inputProfileThinking.value = 'high';
+  elements.testKeyFeedback.className = 'test-feedback hidden';
+  elements.testKeyFeedback.textContent = '';
+  elements.profileFormBox.classList.remove('hidden');
+  elements.inputProfileKey.focus();
 }
 
-function sortQuestionsNatural() {
-  if (state.questions.length <= 1) return;
+function openEditProfileForm(profileId) {
+  const p = getProfileById(profileId);
+  if (!p) return;
 
-  state.questions.sort((a, b) => {
-    const numA = extractNumber(a.name);
-    const numB = extractNumber(b.name);
-    if (numA !== null && numB !== null) {
-      return numA - numB;
+  elements.editProfileId.value = p.id;
+  elements.profileFormTitle.textContent = `Chỉnh Sửa: ${p.name}`;
+  elements.inputProfileName.value = p.name;
+  elements.inputProfileKey.value = p.apiKey;
+
+  const modelExists = Array.from(elements.inputProfileModel.options).some(opt => opt.value === p.model);
+  if (modelExists) {
+    elements.inputProfileModel.value = p.model;
+    elements.inputCustomModel.classList.add('hidden');
+  } else {
+    elements.inputProfileModel.value = 'custom';
+    elements.inputCustomModel.value = p.model;
+    elements.inputCustomModel.classList.remove('hidden');
+  }
+
+  elements.inputProfileThinking.value = p.thinkingLevel || 'high';
+  elements.testKeyFeedback.className = 'test-feedback hidden';
+  elements.testKeyFeedback.textContent = '';
+  elements.profileFormBox.classList.remove('hidden');
+}
+
+function closeProfileForm() {
+  elements.profileFormBox.classList.add('hidden');
+}
+
+function saveProfileFormData() {
+  const name = (elements.inputProfileName.value || '').trim() || 'API Profile';
+  const apiKey = (elements.inputProfileKey.value || '').trim();
+  const selectedModel = elements.inputProfileModel.value === 'custom'
+    ? (elements.inputCustomModel.value || '').trim() || 'gemini-3.8-flash'
+    : elements.inputProfileModel.value;
+  const thinking = elements.inputProfileThinking.value || 'high';
+  const editId = elements.editProfileId.value;
+
+  if (editId) {
+    // Update existing
+    const p = getProfileById(editId);
+    if (p) {
+      p.name = name;
+      p.apiKey = apiKey;
+      p.model = selectedModel;
+      p.thinkingLevel = thinking;
+      p.status = 'untested';
+      p.lastError = null;
     }
-    return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+  } else {
+    // Create new
+    const newProfile = {
+      id: 'prof_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
+      name,
+      apiKey,
+      model: selectedModel,
+      thinkingLevel: thinking,
+      status: 'untested',
+      lastChecked: null,
+      lastError: null,
+      availableModels: []
+    };
+    state.profiles.push(newProfile);
+  }
+
+  saveProfiles();
+  closeProfileForm();
+  showToast(`Đã lưu profile "${name}"!`, 'success');
+}
+
+function deleteProfile(id) {
+  if (state.profiles.length <= 1) {
+    showToast('Phải giữ lại ít nhất 1 API Profile.', 'error');
+    return;
+  }
+  const p = getProfileById(id);
+  if (!confirm(`Bạn có chắc chắn muốn xóa profile "${p?.name || id}" không?`)) return;
+
+  state.profiles = state.profiles.filter(item => item.id !== id);
+  if (state.lookupProfileId === id) state.lookupProfileId = state.profiles[0].id;
+  if (state.solverProfileId === id) state.solverProfileId = state.profiles[0].id;
+  if (state.verifierProfileId === id) state.verifierProfileId = state.profiles[1]?.id || state.profiles[0].id;
+  if (state.arbitratorProfileId === id) state.arbitratorProfileId = '';
+
+  saveProfiles();
+  saveModeAndAssignments();
+  showToast('Đã xóa profile.', 'info');
+}
+
+// ==========================================
+// 4. Test API Key & Fetch Live Models
+// ==========================================
+async function testApiKeyCall(apiKey) {
+  if (!apiKey) {
+    throw new Error('Vui lòng nhập API key trước khi kiểm tra.');
+  }
+
+  // Fetch available models from Google Generative Language API
+  const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`;
+  const resp = await fetch(url).catch(err => {
+    throw new Error('Không thể kết nối tới Google Generative Language API. Kiểm tra mạng.');
   });
 
-  renderQuestions();
-  renderMatrix();
-  showToast('Đã sắp xếp câu hỏi theo thứ tự số tự nhiên (1 ➔ 15)!', 'success');
-}
-
-function extractNumber(str) {
-  const match = str.match(/\d+/);
-  return match ? parseInt(match[0], 10) : null;
-}
-
-function clearAllQuestions() {
-  if (state.questions.length === 0) return;
-  if (!confirm('Bạn có chắc chắn muốn xóa toàn bộ câu hỏi hiện tại không?')) return;
-  state.questions = [];
-  updateQuestionCounters();
-  renderQuestions();
-  renderMatrix();
-  showToast('Đã dọn sạch toàn bộ câu hỏi.');
-}
-
-function updateQuestionCounters() {
-  const total = state.questions.length;
-  elements.totalQuestionsCount.textContent = total;
-  elements.btnSolveAll.disabled = total === 0;
-
-  if (elements.mobileQuestionCount) {
-    elements.mobileQuestionCount.textContent = total;
+  if (resp.status === 429) {
+    throw new Error('API này đang chạm giới hạn sử dụng (429).');
   }
-  if (elements.btnMobileSolve) {
-    elements.btnMobileSolve.disabled = total === 0;
+  if (resp.status === 401 || resp.status === 403) {
+    throw new Error('API key này không hoạt động hoặc không có quyền truy cập model đã chọn (401/403).');
   }
-  if (elements.btnExportReport) {
-    elements.btnExportReport.disabled = total === 0;
+  if (!resp.ok) {
+    const errData = await resp.json().catch(() => ({}));
+    throw new Error(errData.error?.message || `Lỗi API (${resp.status}): ${resp.statusText}`);
   }
 
-  const failedCount = state.questions.filter(q => q.status === 'error' || !q.answerLine).length;
-  elements.btnRetryFailed.disabled = total === 0 || failedCount === 0;
+  const data = await resp.json();
+  const models = (data.models || [])
+    .filter(m => m.supportedGenerationMethods?.includes('generateContent'))
+    .map(m => m.name.replace(/^models\//, ''))
+    .filter(name => /gemini/i.test(name));
+
+  return models;
 }
 
-// ==========================================
-// 4. API Engine, Structured Output & Prompts
-// ==========================================
-const RESPONSE_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  properties: {
-    questions: {
-      type: 'array',
-      description: 'Danh sách câu hỏi theo đúng thứ tự các ảnh được gửi.',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          question: { type: 'string', description: 'Toàn bộ nội dung câu hỏi, không thêm nhãn Câu N:.' },
-          answer_letter: { type: 'string', enum: ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'], description: 'Chữ cái của phương án đúng.' },
-          answer_text: { type: 'string', description: 'Toàn bộ nội dung của phương án đúng.' }
-        },
-        required: ['question', 'answer_letter', 'answer_text']
+async function runProfileTest(profileId) {
+  const p = getProfileById(profileId);
+  if (!p) return;
+  if (!p.apiKey) {
+    showToast(`Profile "${p.name}" chưa có API key để kiểm tra.`, 'error');
+    openEditProfileForm(profileId);
+    return;
+  }
+
+  showToast(`Đang kiểm tra kết nối cho "${p.name}"...`, 'info');
+  try {
+    const models = await testApiKeyCall(p.apiKey);
+    p.status = 'ready';
+    p.lastChecked = new Date().toISOString();
+    p.lastError = null;
+    p.availableModels = models;
+    saveProfiles();
+    showToast(`✓ API "${p.name}" hoạt động tốt! Tìm thấy ${models.length} model.`, 'success');
+  } catch (err) {
+    if (/429|chạm giới hạn/i.test(err.message)) {
+      p.status = 'rate_limited';
+      p.lastError = 'API này đang chạm giới hạn sử dụng.';
+    } else {
+      p.status = 'error';
+      p.lastError = err.message || 'API key không hoạt động.';
+    }
+    p.lastChecked = new Date().toISOString();
+    saveProfiles();
+    showToast(`✕ Lỗi: ${err.message}`, 'error');
+  }
+}
+
+async function testFormKey() {
+  const apiKey = (elements.inputProfileKey.value || '').trim();
+  const feedback = elements.testKeyFeedback;
+  feedback.className = 'test-feedback';
+  feedback.textContent = 'Đang kiểm tra kết nối API...';
+  feedback.classList.remove('hidden');
+
+  try {
+    const models = await testApiKeyCall(apiKey);
+    feedback.className = 'test-feedback success';
+    feedback.textContent = `✓ API Key hợp lệ! Tìm thấy ${models.length} models khả dụng từ Google.`;
+
+    // Populate model dropdown with detected models if available
+    if (models.length > 0) {
+      const currentSelected = elements.inputProfileModel.value;
+      const combined = Array.from(new Set([...DEFAULT_MODELS.map(m => m.id), ...models]));
+      elements.inputProfileModel.innerHTML = combined.map(mId => {
+        return `<option value="${mId}">${mId}</option>`;
+      }).join('') + '<option value="custom">Tự nhập model khác...</option>';
+
+      if (combined.includes(currentSelected)) {
+        elements.inputProfileModel.value = currentSelected;
+      } else if (models.includes('gemini-3.8-flash')) {
+        elements.inputProfileModel.value = 'gemini-3.8-flash';
       }
     }
-  },
-  required: ['questions']
-};
+  } catch (err) {
+    feedback.className = 'test-feedback error';
+    feedback.textContent = `✕ ${err.message}`;
+  }
+}
 
-function supportsThinkingLevel(model) {
-  return /^gemini-3(?:\.1|\.5|\.6|\.7|\.8)?-.+/i.test(model || '') && /flash/i.test(model || '');
+// ==========================================
+// 5. Result Banner & Stats UI
+// ==========================================
+function updateResultBanner() {
+  if (!elements.resultStatusBanner) return;
+
+  if (state.questions.length === 0) {
+    elements.resultStatusBanner.classList.add('hidden');
+    return;
+  }
+  elements.resultStatusBanner.classList.remove('hidden');
+
+  if (state.mode === 'lookup') {
+    elements.bannerModeText.textContent = 'Chế độ: ✓ Chỉ tra (1 Lượt)';
+    const p = getProfileById(state.lookupProfileId);
+    elements.bannerProfilesRow.innerHTML = `
+      <span class="banner-profile-chip">API Giải: <b>${escapeHtml(p?.name || 'Chưa chọn')}</b> (${p?.model || '3.8 Flash'})</span>
+    `;
+  } else {
+    elements.bannerModeText.textContent = 'Chế độ: ✓ Kiểm tra chéo (2 Lượt Độc Lập)';
+    const p1 = getProfileById(state.solverProfileId);
+    const p2 = getProfileById(state.verifierProfileId);
+    const p3 = getProfileById(state.arbitratorProfileId);
+
+    let html = `
+      <span class="banner-profile-chip">1. Giải: <b>${escapeHtml(p1?.name || 'Tài khoản 1')}</b> (${p1?.model || '3.8 Flash'})</span>
+      <span class="banner-profile-chip">2. Kiểm tra: <b>${escapeHtml(p2?.name || 'Tài khoản 2')}</b> (${p2?.model || '3.8 Flash'})</span>
+    `;
+    if (p3) {
+      html += `<span class="banner-profile-chip">3. Phân xử: <b>${escapeHtml(p3.name)}</b> (${p3.model})</span>`;
+    } else {
+      html += `<span class="banner-profile-chip" style="opacity: 0.7;">3. Phân xử: Không cấu hình (Kiểm tra lại câu lẻ)</span>`;
+    }
+    elements.bannerProfilesRow.innerHTML = html;
+  }
+
+  elements.bannerProgressText.textContent = state.currentProcessStage;
+  elements.bannerRequestStats.textContent = `Request đã dùng: ${state.requestStats.run}`;
 }
 
 function updateRequestStatsDisplay() {
-  if (!elements.requestStatsDisplay) return;
+  updateResultBanner();
   const r = state.requestStats;
-  const last = r.lastStatus ? ` • ${r.lastStatus}` : '';
-  elements.requestStatsDisplay.textContent = `Request lượt này: ${r.run} • Giải: ${r.firstPass} • Đối soát: ${r.secondPass} • Phân xử: ${r.arbitration} • Retry: ${r.retries}${last}`;
+  let breakdown = '';
+  if (state.mode === 'lookup') {
+    breakdown = `Chỉ tra: ${r.lookupPass}`;
+  } else {
+    breakdown = `Lượt 1: ${r.firstPass} • Lượt 2: ${r.secondPass}${r.arbitration ? ` • Phân xử: ${r.arbitration}` : ''}`;
+  }
+  if (r.singleRechecks) breakdown += ` • Câu lẻ: ${r.singleRechecks}`;
+  if (r.retries) breakdown += ` • Retry: ${r.retries}`;
+
+  const summary = `Request đã dùng: ${r.run} (${breakdown})`;
+  if (elements.bannerRequestStats) elements.bannerRequestStats.textContent = summary;
 }
 
 function resetRequestStats() {
-  state.requestStats = { run: 0, firstPass: 0, secondPass: 0, arbitration: 0, retries: 0, batches: 0, lastStatus: '' };
+  state.requestStats = {
+    run: 0,
+    lookupPass: 0,
+    firstPass: 0,
+    secondPass: 0,
+    arbitration: 0,
+    singleRechecks: 0,
+    retries: 0,
+    batches: 0,
+    lastStatus: ''
+  };
   updateRequestStatsDisplay();
 }
 
-function registerRequest(kind, statusText = '') {
+function registerRequest(kind, profileName = '') {
   state.requestStats.run += 1;
+  if (kind === 'lookup') state.requestStats.lookupPass += 1;
   if (kind === 'first') state.requestStats.firstPass += 1;
   if (kind === 'second') state.requestStats.secondPass += 1;
   if (kind === 'arbitration') state.requestStats.arbitration += 1;
-  state.requestStats.lastStatus = statusText;
+  if (kind === 'single') state.requestStats.singleRechecks += 1;
   updateRequestStatsDisplay();
 }
 
-function getSystemPrompt() {
-  return `Bạn là chuyên gia giải trắc nghiệm dựa trên hình ảnh, ưu tiên độ chính xác.
-
-Có nhiều hình ảnh, mỗi hình ảnh thường tương ứng với một câu hỏi. Hãy đọc kỹ toàn bộ câu hỏi và tất cả phương án A-H trong từng ảnh.
-Tự giải bằng kiến thức chuyên môn trước khi kết luận. Không suy diễn khi ảnh không đủ rõ.
-
-BẮT BUỘC trả JSON theo schema được cung cấp. Số phần tử questions phải đúng bằng số ảnh được gửi.
-Mỗi phần tử tương ứng đúng theo THỨ TỰ ẢNH.
-- question: chép lại toàn bộ nội dung câu hỏi, không thêm nhãn “Câu 1:” ở đầu.
-- answer_letter: chỉ một chữ cái A-H là phương án đúng.
-- answer_text: chép đầy đủ nội dung của phương án đúng, không chỉ chữ cái.
-
-Hãy tự kiểm tra lại từng câu trước khi trả JSON. Không trả markdown, không trả lời ngoài JSON.`;
+// ==========================================
+// 6. Prompts & Structured JSON Engine
+// ==========================================
+function supportsThinkingLevel(model) {
+  return /gemini-(?:3\.[1-8]|2\.5)/i.test(model || '') && /flash/i.test(model || '');
 }
 
-function getIndependentCheckPrompt(count) {
-  return `Bạn là người kiểm tra ĐỘC LẬP cho ${count} câu trắc nghiệm từ hình ảnh.
+function getStructuredSchema(count) {
+  return {
+    type: 'object',
+    properties: {
+      questions: {
+        type: 'array',
+        description: 'Danh sách câu hỏi trắc nghiệm tương ứng từng ảnh.',
+        items: {
+          type: 'object',
+          properties: {
+            number: { type: 'integer', description: 'Số thứ tự ảnh từ 1 trở đi' },
+            question: { type: 'string', description: 'Nội dung câu hỏi, không thêm nhãn Câu N:' },
+            answer_letter: { type: 'string', description: 'Chữ cái phương án đúng: A, B, C, D...' },
+            answer_text: { type: 'string', description: 'Nội dung đầy đủ của phương án đúng' },
+            uncertain: { type: 'boolean', description: 'True nếu ảnh quá mờ hoặc không đọc rõ' }
+          },
+          required: ['number', 'question', 'answer_letter', 'answer_text']
+        }
+      }
+    },
+    required: ['questions']
+  };
+}
 
-Hãy đọc toàn bộ ảnh và TỰ GIẢI LẠI từ đầu. Không có đáp án lượt trước để tham khảo và tuyệt đối không được dựa vào suy đoán.
+function getLookupPrompt() {
+  return `Bạn là chuyên gia giải đề thi trắc nghiệm từ hình ảnh với độ chính xác cao nhất.
+Đọc kỹ từng ảnh theo đúng thứ tự ảnh được gửi. Tự phân tích câu hỏi và tất cả phương án A, B, C, D (hoặc A-H).
+Tự giải bằng kiến thức chuẩn xác trước khi chốt đáp án.
+
+BẮT BUỘC TRẢ VỀ JSON HỢP LỆ THEO SCHEMA:
+{
+  "questions": [
+    {
+      "number": 1,
+      "question": "Toàn bộ nội dung câu hỏi, không thêm nhãn Câu 1:",
+      "answer_letter": "B",
+      "answer_text": "Nội dung đầy đủ của phương án B",
+      "uncertain": false
+    }
+  ]
+}
+Số lượng phần tử questions phải đúng bằng số ảnh gửi. Không trả markdown hay giải thích ngoài JSON.`;
+}
+
+function getSolverPrompt() {
+  return `Bạn là chuyên gia giải đề trắc nghiệm độc lập (LƯỢT 1).
+Xem từng ảnh câu hỏi, phân tích kỹ nội dung đề và tất cả phương án A, B, C, D (hoặc A-H).
+Tự giải bằng kiến thức chuyên môn và đưa ra đáp án đúng nhất.
+
+BẮT BUỘC trả JSON theo schema:
+{
+  "questions": [
+    {
+      "number": 1,
+      "question": "Nội dung câu hỏi",
+      "answer_letter": "B",
+      "answer_text": "Nội dung phương án",
+      "uncertain": false
+    }
+  ]
+}
+Chỉ trả JSON, không thêm văn bản ngoài JSON.`;
+}
+
+function getIndependentVerifierPrompt(count) {
+  // CRITICAL REQUIREMENT (PHẦN 7):
+  // Lượt 2 phải giải hoàn toàn độc lập từ ảnh, KHÔNG nhìn đáp án lượt 1.
+  return `Bạn là người kiểm tra ĐỘC LẬP cho ${count} câu trắc nghiệm từ hình ảnh (LƯỢT 2).
+Hãy đọc kỹ toàn bộ hình ảnh và TỰ GIẢI LẠI TỪ ĐẦU từ nội dung ảnh. Tuyệt đối không có đáp án lượt trước để tham khảo.
 Đối với từng ảnh, xác định chính xác câu hỏi, các phương án và phương án đúng.
 
-BẮT BUỘC trả JSON theo schema được cung cấp, đúng ${count} phần tử và đúng thứ tự ảnh:
-- question: toàn bộ nội dung câu hỏi, không thêm “Câu N:” ở đầu.
-- answer_letter: một chữ cái A-H.
-- answer_text: toàn bộ nội dung phương án đúng.
-
-Không trả markdown hay lời giải thích ngoài JSON.`;
+BẮT BUỘC trả về JSON theo schema:
+{
+  "questions": [
+    {
+      "number": 1,
+      "question": "Nội dung câu hỏi",
+      "answer_letter": "B",
+      "answer_text": "Nội dung phương án",
+      "uncertain": false
+    }
+  ]
+}
+Số lượng đúng ${count} câu theo thứ tự ảnh. Không trả markdown hay chữ thừa.`;
 }
 
 function getArbitrationPrompt(conflicts) {
-  const candidates = conflicts.map((c, i) => {
-    return `Câu ${i + 1}:
+  const list = conflicts.map((c, i) => {
+    return `--- CÂU LỆCH ${i + 1} (Ảnh số ${i + 1}) ---
 Lượt 1: ${c.first.answer_letter}. ${c.first.answer_text}
 Lượt 2: ${c.second.answer_letter}. ${c.second.answer_text}
-Câu hỏi lượt 1: ${c.first.question || '(không rõ)'}
-Câu hỏi lượt 2: ${c.second.question || '(không rõ)'}`;
+Nội dung câu hỏi tạm ghi: ${c.first.question || c.second.question || '(xem ảnh)'}`;
   }).join('\n\n');
 
-  return `Bạn là người PHÂN XỬ cuối cùng cho các câu trắc nghiệm mà hai lượt giải độc lập không thống nhất.
+  return `Bạn là người PHÂN XỬ CUỐI CÙNG cho các câu trắc nghiệm mà hai lượt giải độc lập có đáp án KHÁC NHAU.
+Xem lại trực tiếp hình ảnh gốc của từng câu bên dưới, đọc kỹ đề bài và tất cả các phương án.
 
-Hãy xem lại trực tiếp hình ảnh của từng câu bên dưới, đọc lại toàn bộ đề và các phương án, sau đó tự suy luận bằng kiến thức chuyên môn.
-Không được chọn theo đa số một cách máy móc. Phải dựa vào nội dung trong ảnh và kiến thức đúng.
+DANH SÁCH HAI LƯỢT TRƯỚC ĐƯA RA:
+${list}
 
-${candidates}
+QUY TẮC PHÂN XỬ:
+1. Không được mặc định chọn Lượt 1. Không được mặc định chọn Lượt 2.
+2. Ưu tiên tuyệt đối vào nội dung hình ảnh gốc và kiến thức chuẩn xác nhất.
+3. Nếu cả 2 lượt đều sai, bạn tự chọn phương án đúng thực sự từ ảnh.
+4. Nếu vẫn không thể kết luận chắc chắn vì ảnh mờ hoặc đề tranh cãi: đặt "uncertain": true, "answer_letter": "?", "answer_text": "Không xác định chắc chắn".
 
-BẮT BUỘC trả JSON theo schema được cung cấp, đúng ${conflicts.length} phần tử và đúng thứ tự ảnh được gửi.
-Mỗi phần tử:
-- question: toàn bộ câu hỏi.
-- answer_letter: chữ cái A-H của đáp án cuối cùng.
-- answer_text: toàn bộ nội dung đáp án cuối cùng.
-
-Không trả markdown hay giải thích ngoài JSON.`;
+BẮT BUỘC trả JSON:
+{
+  "questions": [
+    {
+      "number": 1,
+      "question": "Nội dung câu hỏi",
+      "answer_letter": "B",
+      "answer_text": "Nội dung phương án chốt",
+      "uncertain": false
+    }
+  ]
+}
+Đúng ${conflicts.length} phần tử theo thứ tự ảnh. Không thêm lời giải thích ngoài JSON.`;
 }
 
 function buildParts(images, prompt) {
   const parts = [{ text: `${prompt}\n\n` }];
   images.forEach((q, idx) => {
-    parts.push({ text: `=== ẢNH ${idx + 1} / ${images.length} ===\nTên file: ${q.name || `cau-${idx + 1}.jpg`}\n` });
+    parts.push({ text: `=== ẢNH CÂU HỎI ${idx + 1} / ${images.length} (Tên: ${q.name || `cau_${idx + 1}.jpg`}) ===\n` });
     parts.push({
       inline_data: {
         mime_type: q.mimeType || 'image/jpeg',
@@ -579,342 +852,239 @@ function buildParts(images, prompt) {
   return parts;
 }
 
-function getGenerationConfig(prompt, imageCount) {
-  const schema = {
-    ...RESPONSE_SCHEMA,
-    properties: {
-      questions: {
-        ...RESPONSE_SCHEMA.properties.questions,
-        minItems: imageCount,
-        maxItems: imageCount
-      }
-    }
-  };
-
-  const config = {
-    responseFormat: {
-      text: {
-        mimeType: 'application/json',
-        schema
-      }
-    },
-    maxOutputTokens: Math.min(14000, Math.max(2500, 650 + imageCount * 800))
-  };
-
-  if (supportsThinkingLevel(state.model)) {
-    config.thinkingConfig = { thinkingLevel: state.thinkingLevel || 'high' };
+// ==========================================
+// 7. Robust Gemini API Transport
+// ==========================================
+async function callGeminiApiForProfile(profile, images, prompt, kind, retryCount = 0) {
+  if (!profile || !profile.apiKey) {
+    const pName = profile?.name || 'Tài khoản đã chọn';
+    throw new Error(`Profile "${pName}" chưa có API key. Vui lòng bấm biểu tượng Cài đặt để nhập key.`);
   }
 
-  return config;
-}
-
-async function callGeminiBatchApi(images, prompt, kind, retryCount = 0) {
-  if (!state.apiKey) {
-    throw new Error('Chưa có Gemini API Key. Vào Cấu hình API để nhập key cá nhân.');
-  }
-
-  const model = state.model || 'gemini-3.8-flash';
+  const model = profile.model || 'gemini-3.8-flash';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+
+  const generationConfig = {
+    responseMimeType: 'application/json',
+    responseSchema: getStructuredSchema(images.length),
+    maxOutputTokens: Math.min(14000, Math.max(3000, 700 + images.length * 850))
+  };
+
+  // Thinking Level logic (Section 2: Default High when Cross-Check)
+  if (supportsThinkingLevel(model)) {
+    let level = profile.thinkingLevel || 'high';
+    if (state.mode === 'cross_check' && level === 'low') {
+      level = 'high';
+    }
+    generationConfig.thinkingConfig = { thinkingLevel: level };
+  }
+
   const payload = {
     contents: [{ role: 'user', parts: buildParts(images, prompt) }],
-    generationConfig: getGenerationConfig(prompt, images.length)
+    generationConfig
   };
 
-  registerRequest(kind, `đang gửi ${kind}`);
+  registerRequest(kind, profile.name);
 
   try {
     const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-goog-api-key': state.apiKey
+        'x-goog-api-key': profile.apiKey
       },
       body: JSON.stringify(payload)
     });
 
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const message = data.error?.message || response.statusText || 'Unknown API error';
 
-      // 429 = quota/rate limit: KHÔNG retry tự động.
+    if (!response.ok) {
+      const apiMsg = data.error?.message || response.statusText || 'Lỗi không xác định';
+
+      // 429 = Rate limit/Quota: KHÔNG retry liên tục (Section 1 & 12)
       if (response.status === 429) {
-        state.requestStats.lastStatus = '429 - quota/rate limit';
-        updateRequestStatsDisplay();
-        throw new Error(`API đã chạm giới hạn quota/rate limit (429). ${message}`);
+        profile.status = 'rate_limited';
+        profile.lastError = 'API này đang chạm giới hạn sử dụng.';
+        saveProfiles();
+        throw new Error(`API "${profile.name}" đang chạm giới hạn sử dụng (429).`);
       }
 
-      // Retry có kiểm soát chỉ cho lỗi tạm thời phía dịch vụ.
+      // 401 / 403 = Invalid key or no access
+      if (response.status === 401 || response.status === 403) {
+        profile.status = 'error';
+        profile.lastError = 'API key này không hoạt động hoặc không có quyền truy cập model đã chọn.';
+        saveProfiles();
+        throw new Error(`API key của "${profile.name}" không hoạt động hoặc không có quyền truy cập model đã chọn (${response.status}).`);
+      }
+
+      // 413 = Payload Too Large: Ném cờ để chia batch nhỏ hơn
+      if (response.status === 413) {
+        throw new Error('PAYLOAD_413_TOO_LARGE');
+      }
+
+      // 400 = Invalid request
+      if (response.status === 400) {
+        profile.status = 'error';
+        saveProfiles();
+        throw new Error(`Yêu cầu không hợp lệ cho "${profile.name}" (400): ${apiMsg}`);
+      }
+
+      // 500, 502, 503, 504 = Lỗi dịch vụ tạm thời: Retry tối đa 1-2 lần có backoff
       if ([500, 502, 503, 504].includes(response.status) && retryCount < 2) {
         state.requestStats.retries += 1;
         updateRequestStatsDisplay();
-        const waitMs = 1400 * Math.pow(2, retryCount) + Math.floor(Math.random() * 500);
+        const waitMs = 1200 * Math.pow(2, retryCount) + Math.floor(Math.random() * 400);
         await delay(waitMs);
-        return callGeminiBatchApi(images, prompt, kind, retryCount + 1);
+        return callGeminiApiForProfile(profile, images, prompt, kind, retryCount + 1);
       }
 
-      if (response.status === 400) {
-        throw new Error(`Yêu cầu không hợp lệ (400): ${message}`);
-      }
-      if (response.status === 401 || response.status === 403) {
-        throw new Error(`API Key không hợp lệ hoặc không có quyền dùng model này (${response.status}).`);
-      }
-      throw new Error(`Google API lỗi (${response.status}): ${message}`);
+      throw new Error(`Google API (${response.status}): ${apiMsg}`);
     }
 
-    const text = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
-    if (!text.trim()) {
-      throw new Error('Gemini không trả về nội dung hợp lệ.');
+    const rawText = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
+    if (!rawText.trim()) {
+      throw new Error(`Gemini (${profile.name}) không trả về nội dung kết quả.`);
     }
-    state.requestStats.lastStatus = '200 - OK';
-    updateRequestStatsDisplay();
-    return text.trim();
+
+    profile.status = 'ready';
+    profile.lastError = null;
+    return rawText.trim();
   } catch (err) {
-    const msg = err?.message || '';
-    const retryableNetwork = /Failed to fetch|NetworkError|network|timed out|Load failed/i.test(msg);
-    const alreadyGoogleError = /^Google API lỗi|^Yêu cầu không hợp lệ|^API Key|^API đã chạm/i.test(msg);
+    if (err.message === 'PAYLOAD_413_TOO_LARGE') throw err;
 
-    if (retryableNetwork && !alreadyGoogleError && retryCount < 2) {
+    const msg = err?.message || '';
+    const isNetwork = /Failed to fetch|NetworkError|network|timeout|Load failed/i.test(msg);
+    const isDomainError = /API này đang chạm|không hoạt động|Yêu cầu không hợp lệ/i.test(msg);
+
+    if (isNetwork && !isDomainError && retryCount < 2) {
       state.requestStats.retries += 1;
       updateRequestStatsDisplay();
       const waitMs = 1000 * Math.pow(2, retryCount);
       await delay(waitMs);
-      return callGeminiBatchApi(images, prompt, kind, retryCount + 1);
+      return callGeminiApiForProfile(profile, images, prompt, kind, retryCount + 1);
     }
     throw err;
   }
 }
 
-function normalizeStructuredItems(raw, count) {
+// ==========================================
+// 8. Output Normalization & Format Enforcer
+// ==========================================
+// Section 9: JSON Nội bộ & Định dạng hiển thị chuẩn:
+// Câu 1: [nội dung câu hỏi]
+// B. [nội dung đáp án đúng]
+function cleanQuestionLine(rawQuestion, index) {
+  let qText = String(rawQuestion || '').trim();
+  qText = qText.replace(/^Câu\s*(?:hỏi\s*)?\d+\s*:\s*/i, '').trim();
+  return `Câu ${index + 1}: ${qText || '(Không đọc được câu hỏi từ ảnh)'}`;
+}
+
+function cleanAnswerLine(letter, answerText) {
+  const l = String(letter || '').trim().toUpperCase();
+  const text = String(answerText || '').trim();
+  const validLetter = /^[A-H]$/.test(l) ? l : '?';
+
+  if (validLetter === '?') {
+    return text ? `? ${text}` : 'Chưa xác định được đáp án';
+  }
+  return text ? `${validLetter}. ${text}` : `${validLetter}.`;
+}
+
+function parseStructuredJson(rawText, expectedCount) {
   let parsed;
   try {
-    const cleaned = String(raw || '').replace(/^```json\s*/i, '').replace(/\s*```$/i, '').trim();
+    const cleaned = String(rawText || '').replace(/^```json\s*/i, '').replace(/\s*```$/i, '').trim();
     parsed = JSON.parse(cleaned);
   } catch (_) {
-    return parseBatchResponse(raw, count);
+    return fallbackRegexParse(rawText, expectedCount);
   }
 
   const items = Array.isArray(parsed) ? parsed : parsed?.questions;
-  if (!Array.isArray(items)) return parseBatchResponse(raw, count);
+  if (!Array.isArray(items)) {
+    return fallbackRegexParse(rawText, expectedCount);
+  }
 
-  return Array.from({ length: count }, (_, i) => {
+  return Array.from({ length: expectedCount }, (_, i) => {
     const item = items[i] || {};
     const letter = String(item.answer_letter || '').trim().toUpperCase();
-    const questionText = String(item.question || '').trim();
-    const answerText = String(item.answer_text || '').trim();
+    const validLetter = /^[A-H]$/.test(letter) ? letter : '?';
+    const isUncertain = Boolean(item.uncertain) || validLetter === '?';
+
     return {
-      questionLine: `Câu ${i + 1}: ${questionText || 'Không đọc được câu hỏi'}`,
-      answerLine: `${letter || '?'}${answerText ? `. ${answerText}` : ''}`,
-      letter: /^[A-H]$/.test(letter) ? letter : '?',
-      fullText: `${questionText}\n${letter || '?'}${answerText ? `. ${answerText}` : ''}`.trim()
+      number: i + 1,
+      questionText: String(item.question || '').trim(),
+      answerLetter: isUncertain ? '?' : validLetter,
+      answerText: String(item.answer_text || '').trim(),
+      uncertain: isUncertain
     };
   });
 }
 
-function parseAnswerResponse(rawText) {
-  const cleanText = String(rawText || '').replace(/```[a-z]*|```/gi, '').trim();
-  const lines = cleanText.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+function fallbackRegexParse(rawText, count) {
+  const clean = String(rawText || '').replace(/```[a-z]*|```/gi, '').trim();
+  const lines = clean.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
 
-  let questionLine = '';
-  let answerLine = '';
-  const questionIndex = lines.findIndex(line => /^Câu\s*(?:hỏi\s*)?\d+\s*:/i.test(line));
-  if (questionIndex >= 0) {
-    questionLine = lines[questionIndex];
-    const answerCandidate = lines.slice(questionIndex + 1).find(line => /^[A-H]\s*[\.):]/i.test(line));
-    answerLine = answerCandidate || lines[questionIndex + 1] || '';
-  } else if (lines.length >= 2) {
-    questionLine = lines[0];
-    answerLine = lines.find(line => /^[A-H]\s*[\.):]/i.test(line)) || lines[1];
-  } else if (lines.length === 1) {
-    if (/^[A-H]\s*[\.):]/i.test(lines[0])) answerLine = lines[0];
-    else questionLine = lines[0];
-  }
-
-  questionLine = questionLine.replace(/^Câu hỏi\s+(\d+)\s*:/i, 'Câu $1:');
-  const letterMatch = answerLine.match(/^\s*([A-H])\s*[\.):]/i) || answerLine.match(/\b([A-H])\s*[\.):]/i);
-  const letter = letterMatch ? letterMatch[1].toUpperCase() : '?';
-  return {
-    questionLine: questionLine || 'Không đọc được câu hỏi',
-    answerLine: answerLine || 'Chưa xác định được đáp án',
-    letter,
-    fullText: `${questionLine}\n${answerLine}`.trim()
-  };
-}
-
-function parseBatchResponse(rawText, count) {
-  const text = String(rawText || '').replace(/```[a-z]*|```/gi, '').trim();
-  const matches = [...text.matchAll(/(?=Câu\s*(?:hỏi\s*)?\d+\s*:)/gi)];
-  const chunks = [];
-
-  if (matches.length >= count) {
-    for (let i = 0; i < count; i++) {
-      const start = matches[i].index;
-      const end = i + 1 < matches.length ? matches[i + 1].index : text.length;
-      chunks.push(text.slice(start, end).trim());
-    }
-  } else {
-    const sections = text.split(/(?:^|\n)\s*===?\s*ẢNH\s*\d+[^\n]*\n?/i).map(s => s.trim()).filter(Boolean);
-    if (sections.length >= count) {
-      chunks.push(...sections.slice(0, count));
-    } else {
-      const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-      let current = [];
-      for (const line of lines) {
-        if (/^Câu\s*(?:hỏi\s*)?\d+\s*:/i.test(line) && current.length) {
-          chunks.push(current.join('\n'));
-          current = [line];
-        } else {
-          current.push(line);
-        }
-      }
-      if (current.length) chunks.push(current.join('\n'));
-    }
-  }
-
-  return Array.from({ length: count }, (_, i) => parseAnswerResponse(chunks[i] || ''));
-}
-
-function normalizeParsedBatch(parsed, expectedCount, globalStart = 0) {
-  return Array.from({ length: expectedCount }, (_, i) => {
-    const item = parsed[i] || {};
-    const rawQ = String(item.questionLine || '').replace(/^Câu\s*(?:hỏi\s*)?\d+\s*:/i, '').trim();
+  return Array.from({ length: count }, (_, i) => {
+    const line = lines[i] || '';
+    const match = line.match(/\b([A-H])\s*[\.):]/i);
+    const letter = match ? match[1].toUpperCase() : '?';
     return {
-      questionLine: `Câu ${globalStart + i + 1}: ${rawQ || 'Không đọc được câu hỏi'}`,
-      answerLine: item.answerLine || 'Chưa xác định được đáp án',
-      letter: /^[A-H]$/.test(item.letter || '') ? item.letter : '?',
-      fullText: item.fullText || `${rawQ}\n${item.answerLine || ''}`.trim()
+      number: i + 1,
+      questionText: line.replace(/\b[A-H]\s*[\.):].*/, '').trim(),
+      answerLetter: letter,
+      answerText: line,
+      uncertain: letter === '?'
     };
   });
 }
 
-function getArbitrationInput(first, second) {
-  return first.map((f, i) => ({
-    index: i,
-    first: {
-      question: f.questionLine,
-      answer_letter: f.letter,
-      answer_text: f.answerLine
-    },
-    second: {
-      question: second[i]?.questionLine || '',
-      answer_letter: second[i]?.letter || '?',
-      answer_text: second[i]?.answerLine || ''
-    }
-  }));
+// ==========================================
+// 9. Adaptive Payload Budget & Image Batching
+// ==========================================
+function estimatePayloadBytes(images) {
+  const base64Bytes = images.reduce((sum, q) => sum + String(q.base64 || '').length, 0);
+  return base64Bytes + 15000;
 }
 
-function applyParsedResults(batch, parsed) {
-  batch.forEach((q, idx) => {
-    const item = parsed[idx] || {};
-    q.questionLine = item.questionLine || q.questionLine;
-    q.answerLine = item.answerLine || q.answerLine;
-    q.letter = item.letter || '?';
-    q.answer = item.letter || '?';
-    q.check1 = item.letter || '?';
-    q.status = q.letter !== '?' ? 'loading' : 'warning';
-    q.confidence = q.letter !== '?' ? 'pending-check' : 'warning';
-    q.explanation = item.fullText || `${q.questionLine}\n${q.answerLine}`;
-  });
-}
-
-function applyFinalPass(batch, firstPass, secondPass, arbitrationByIndex = new Map()) {
-  batch.forEach((q, idx) => {
-    const first = firstPass[idx] || {};
-    const second = secondPass[idx] || {};
-    const arbitration = arbitrationByIndex.get(idx);
-
-    if (arbitration) {
-      q.check2 = second.letter || '?';
-      q.check3 = arbitration.letter || '?';
-      q.questionLine = arbitration.questionLine || second.questionLine || first.questionLine || q.questionLine;
-      q.answerLine = arbitration.answerLine || second.answerLine || first.answerLine || q.answerLine;
-      q.letter = arbitration.letter || second.letter || first.letter || '?';
-      q.answer = q.letter;
-      q.status = q.letter !== '?' ? 'done' : 'warning';
-      q.confidence = 'arbitrated';
-      q.explanation = `${arbitration.fullText || q.answerLine}\n\n✓ Lượt 1: ${first.letter || '?'} • Lượt 2: ${second.letter || '?'} • Phân xử: ${q.letter}`;
-      return;
-    }
-
-    q.check2 = second.letter || '?';
-    const agree = first.letter !== '?' && first.letter === second.letter;
-
-    if (agree) {
-      q.questionLine = second.questionLine || first.questionLine || q.questionLine;
-      q.answerLine = second.answerLine || first.answerLine || q.answerLine;
-      q.letter = second.letter;
-      q.answer = q.letter;
-      q.status = 'done';
-      q.confidence = 'high';
-      q.explanation = `${second.fullText || q.answerLine}\n\n✓ Hai lượt giải độc lập khớp đáp án ${q.letter}.`;
-    } else if (second.letter !== '?' || first.letter !== '?') {
-      // Hai lượt không thống nhất mà không phân xử được: không tự đoán một đáp án.
-      q.questionLine = second.questionLine || first.questionLine || q.questionLine;
-      q.answerLine = '⚠ Chưa thể chốt đáp án — hai lượt giải không thống nhất.';
-      q.letter = '?';
-      q.answer = '?';
-      q.status = 'warning';
-      q.confidence = 'unresolved-conflict';
-      q.explanation = `${first.fullText || first.answerLine || ''}\n\n⚠ Lượt 1: ${first.letter || '?'} • Lượt 2: ${second.letter || '?'} — cần phân xử lại.`.trim();
-    } else {
-      q.status = 'warning';
-      q.confidence = 'warning';
-      q.explanation = `${first.fullText || q.answerLine}\n\n⚠ Lượt 2 không xác định được đáp án.`;
-    }
-  });
-}
-
-function getRequestProbePrompt(count) {
-  return [
-    getSystemPrompt(),
-    getIndependentCheckPrompt(count),
-    buildArbitrationProbePrompt(Math.min(count, 2))
-  ].join('\n\n');
-}
-
-async function fitBatchToRequestBudget(images) {
+async function fitImagesWithinBudget(images) {
   const targetBytes = state.maxInlineRequestBytes || 18_500_000;
-  if (estimateInlineRequestBytes(images, getRequestProbePrompt(images.length)) <= targetBytes) {
-    return true;
-  }
+  if (estimatePayloadBytes(images) <= targetBytes) return true;
 
-  const levels = [
-    { maxDimension: 1700, quality: 0.82 },
-    { maxDimension: 1550, quality: 0.76 },
-    { maxDimension: 1400, quality: 0.70 },
-    { maxDimension: 1280, quality: 0.64 },
-    { maxDimension: 1120, quality: 0.58 },
-    { maxDimension: 960, quality: 0.52 }
+  const qualitySteps = [
+    { maxDim: 1650, quality: 0.80 },
+    { maxDim: 1450, quality: 0.72 },
+    { maxDim: 1250, quality: 0.65 },
+    { maxDim: 1050, quality: 0.55 },
+    { maxDim: 900,  quality: 0.48 }
   ];
 
-  for (const level of levels) {
+  for (const step of qualitySteps) {
     for (const q of images) {
-      await recompressQuestionImage(q, level.maxDimension, level.quality);
+      await recompressImage(q, step.maxDim, step.quality);
     }
-    if (estimateInlineRequestBytes(images, getRequestProbePrompt(images.length)) <= targetBytes) {
-      showToast(`Đã tự tối ưu ${images.length} ảnh để giữ request dưới ngưỡng an toàn.`, 'info');
+    if (estimatePayloadBytes(images) <= targetBytes) {
       return true;
     }
   }
-
   return false;
 }
 
-function recompressQuestionImage(q, maxDimension, quality) {
+function recompressImage(q, maxDimension, quality) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
       try {
-        const sourceDataUrl = q.originalDataUrl || q.dataUrl;
         const scale = Math.min(1, maxDimension / Math.max(img.naturalWidth, img.naturalHeight));
         const width = Math.max(1, Math.round(img.naturalWidth * scale));
         const height = Math.max(1, Math.round(img.naturalHeight * scale));
+
         const canvas = document.createElement('canvas');
         canvas.width = width;
         canvas.height = height;
         const ctx = canvas.getContext('2d', { alpha: false });
         ctx.drawImage(img, 0, 0, width, height);
+
         const dataUrl = canvas.toDataURL('image/jpeg', quality);
-        q.originalDataUrl = q.originalDataUrl || sourceDataUrl;
         q.dataUrl = dataUrl;
         q.base64 = dataUrl.split(',')[1];
         q.mimeType = 'image/jpeg';
@@ -928,71 +1098,40 @@ function recompressQuestionImage(q, maxDimension, quality) {
   });
 }
 
-function estimateInlineRequestBytes(images, prompt = '') {
-  const base64Bytes = images.reduce((sum, q) => sum + String(q.base64 || '').length, 0);
-  const metadataBytes = images.reduce((sum, q, idx) => {
-    const label = `\n\n=== ẢNH ${idx + 1} / ${images.length} ===\nTên file: ${q.name || `cau-${idx + 1}.jpg`}\n`;
-    return sum + label.length + 180;
-  }, 0);
-  return base64Bytes + String(prompt).length + metadataBytes + 8000;
-}
-
-function buildArbitrationProbePrompt(count) {
-  const fake = Array.from({ length: count }, (_, i) => ({
-    first: { question: `Câu hỏi ${i + 1}`, answer_letter: 'A', answer_text: 'Đáp án mẫu' },
-    second: { question: `Câu hỏi ${i + 1}`, answer_letter: 'B', answer_text: 'Đáp án mẫu' }
-  }));
-  return getArbitrationPrompt(fake);
-}
-
-async function splitImagesForRequest(images) {
-  const maxImages = state.maxImagesPerRequest || 15;
+async function splitImagesIntoBatches(images) {
+  const maxPerBatch = state.maxImagesPerRequest || 15;
   const batches = [];
   let current = [];
 
-  for (const image of images) {
-    if (current.length >= maxImages) {
-      await fitBatchToRequestBudget(current);
+  for (const img of images) {
+    if (current.length >= maxPerBatch) {
+      await fitImagesWithinBudget(current);
       batches.push(current);
       current = [];
     }
 
-    const currentSnapshot = current.map(q => ({
-      q,
-      dataUrl: q.dataUrl,
-      base64: q.base64,
-      mimeType: q.mimeType
-    }));
-    const candidate = [...current, image];
-    const fits = await fitBatchToRequestBudget(candidate);
+    const testCandidate = [...current, img];
+    const fits = await fitImagesWithinBudget(testCandidate);
 
-    if (fits && candidate.length <= maxImages) {
-      current = candidate;
-      continue;
-    }
-
-    if (current.length > 0) {
-      // Candidate did not fit; restore current batch so we do not unnecessarily
-      // keep a heavily compressed version just because a later image was too large.
-      currentSnapshot.forEach(s => {
-        s.q.dataUrl = s.dataUrl;
-        s.q.base64 = s.base64;
-        s.q.mimeType = s.mimeType;
-      });
-      await fitBatchToRequestBudget(current);
-      batches.push(current);
-      current = [image];
-      await fitBatchToRequestBudget(current);
+    if (fits && testCandidate.length <= maxPerBatch) {
+      current = testCandidate;
     } else {
-      current = [image];
-      await fitBatchToRequestBudget(current);
-      batches.push(current);
-      current = [];
+      if (current.length > 0) {
+        await fitImagesWithinBudget(current);
+        batches.push(current);
+        current = [img];
+        await fitImagesWithinBudget(current);
+      } else {
+        current = [img];
+        await fitImagesWithinBudget(current);
+        batches.push(current);
+        current = [];
+      }
     }
   }
 
-  if (current.length) {
-    await fitBatchToRequestBudget(current);
+  if (current.length > 0) {
+    await fitImagesWithinBudget(current);
     batches.push(current);
   }
 
@@ -1000,138 +1139,230 @@ async function splitImagesForRequest(images) {
 }
 
 // ==========================================
-// 5. Solver: multi-pass verification
+// 10. Main Solver Engine (Lookup & Cross-Check)
 // ==========================================
 async function solveAllQuestions() {
   if (state.questions.length === 0) return;
-  if (!state.apiKey) {
-    elements.settingsModal.classList.remove('hidden');
-    showToast('Vui lòng nhập API key cá nhân trước khi giải.', 'error');
-    return;
+
+  // Validate Active Mode Profiles
+  if (state.mode === 'lookup') {
+    const solver = getProfileById(state.lookupProfileId);
+    if (!solver || !solver.apiKey) {
+      elements.settingsModal.classList.remove('hidden');
+      showToast('Vui lòng chọn Profile có API key hợp lệ trong chế độ Chỉ tra.', 'error');
+      return;
+    }
+  } else {
+    // Cross check requires at least 2 profiles with keys
+    const p1 = getProfileById(state.solverProfileId);
+    const p2 = getProfileById(state.verifierProfileId);
+    if (!p1 || !p1.apiKey || !p2 || !p2.apiKey) {
+      elements.settingsModal.classList.remove('hidden');
+      showToast('Chế độ Kiểm tra chéo cần cấu hình cả API 1 (Giải) và API 2 (Kiểm tra).', 'error');
+      return;
+    }
   }
 
   const pendingQuestions = state.questions.filter(q => q.status !== 'done');
   if (pendingQuestions.length === 0) {
-    showToast('Tất cả câu hỏi đã có kết quả.', 'success');
+    showToast('Tất cả câu hỏi đã được giải hoàn tất.', 'success');
     return;
   }
 
   if (!state.timer.isRunning) toggleTimer();
   elements.btnSolveAll.disabled = true;
   if (elements.btnMobileSolve) elements.btnMobileSolve.disabled = true;
-  pendingQuestions.forEach(q => { q.status = 'loading'; renderQuestionCard(q); });
-  resetRequestStats();
+
+  pendingQuestions.forEach(q => {
+    q.status = 'loading';
+    renderQuestionCard(q);
+  });
   renderMatrix();
+  resetRequestStats();
 
   try {
-    const batches = await splitImagesForRequest(pendingQuestions);
+    const batches = await splitImagesIntoBatches(pendingQuestions);
     state.requestStats.batches = batches.length;
     updateRequestStatsDisplay();
 
-    showToast(
-      batches.length === 1
-        ? `Đang xử lý ${pendingQuestions.length} ảnh bằng ${state.model} (Thinking ${state.thinkingLevel})...`
-        : `Đã tự chia ${pendingQuestions.length} ảnh thành ${batches.length} batch để giữ request an toàn.`,
-      'info'
-    );
+    let globalStartIndex = 0;
 
-    let globalStart = 0;
-    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
-      const batch = batches[batchIndex];
-      const batchLabel = batches.length > 1 ? ` (${batchIndex + 1}/${batches.length})` : '';
-      showToast(`Lượt 1: giải ${batch.length} ảnh${batchLabel}...`, 'info');
+    for (let bIndex = 0; bIndex < batches.length; bIndex++) {
+      const batch = batches[bIndex];
+      const batchLabel = batches.length > 1 ? ` (Batch ${bIndex + 1}/${batches.length})` : '';
 
-      const rawFirst = await callGeminiBatchApi(batch, getSystemPrompt(), 'first');
-      const firstPass = normalizeParsedBatch(normalizeStructuredItems(rawFirst, batch.length), batch.length, globalStart);
-      applyParsedResults(batch, firstPass);
-      renderQuestions();
-      renderMatrix();
+      if (state.mode === 'lookup') {
+        // ========================================
+        // CHẾ ĐỘ 1: CHỈ TRA (1 request per batch)
+        // ========================================
+        const solverProfile = getProfileById(state.lookupProfileId);
+        state.currentProcessStage = `Đang phân tích ảnh ${globalStartIndex + 1}–${globalStartIndex + batch.length}${batchLabel}...`;
+        updateResultBanner();
+        showToast(state.currentProcessStage, 'info');
 
-      if (!state.doubleCheck) {
+        const rawResult = await callGeminiApiForProfile(solverProfile, batch, getLookupPrompt(), 'lookup');
+        const parsed = parseStructuredJson(rawResult, batch.length);
+
         batch.forEach((q, idx) => {
-          const f = firstPass[idx];
-          q.status = f.letter !== '?' ? 'done' : 'warning';
-          q.confidence = f.letter !== '?' ? 'single-pass' : 'warning';
+          const item = parsed[idx] || {};
+          const qNum = globalStartIndex + idx;
+          q.questionLine = cleanQuestionLine(item.questionText, qNum);
+          q.answerLine = cleanAnswerLine(item.answerLetter, item.answerText);
+          q.letter = item.answerLetter || '?';
+          q.status = q.letter !== '?' ? 'done' : 'warning';
+          q.confidence = 'single-pass';
+          q.check1 = q.letter;
+          q.check2 = null;
+          q.check3 = null;
+        });
+
+      } else {
+        // ========================================
+        // CHẾ ĐỘ 2: KIỂM TRA CHÉO (Pass 1 + Pass 2 Độc Lập)
+        // ========================================
+        const solverProfile = getProfileById(state.solverProfileId);
+        const verifierProfile = getProfileById(state.verifierProfileId);
+        const arbitratorProfile = getProfileById(state.arbitratorProfileId);
+
+        // Lượt 1: Giải độc lập với Profile 1
+        state.currentProcessStage = `Đang phân tích Lượt 1 (${solverProfile.name})${batchLabel}...`;
+        updateResultBanner();
+        showToast(state.currentProcessStage, 'info');
+
+        const rawFirst = await callGeminiApiForProfile(solverProfile, batch, getSolverPrompt(), 'first');
+        const firstPass = parseStructuredJson(rawFirst, batch.length);
+
+        // Cập nhật tạm thời để người dùng thấy đáp án Lượt 1 ngay
+        batch.forEach((q, idx) => {
+          const item = firstPass[idx] || {};
+          const qNum = globalStartIndex + idx;
+          q.questionLine = cleanQuestionLine(item.questionText, qNum);
+          q.answerLine = cleanAnswerLine(item.answerLetter, item.answerText);
+          q.letter = item.answerLetter || '?';
+          q.check1 = item.answerLetter || '?';
+          q.status = 'loading';
         });
         renderQuestions();
         renderMatrix();
-        globalStart += batch.length;
-        continue;
-      }
 
-      // Lượt 2: giải độc lập, KHÔNG nhìn kết quả lượt 1.
-      showToast(`Lượt 2: giải độc lập để đối soát${batchLabel}...`, 'info');
-      let secondPass;
-      try {
-        const rawSecond = await callGeminiBatchApi(batch, getIndependentCheckPrompt(batch.length), 'second');
-        secondPass = normalizeParsedBatch(normalizeStructuredItems(rawSecond, batch.length), batch.length, globalStart);
-      } catch (secondErr) {
-        console.error('Lỗi lượt 2:', secondErr);
-        batch.forEach((q, idx) => {
-          const first = firstPass[idx];
-          q.status = first.letter !== '?' ? 'warning' : 'error';
-          q.confidence = 'verification-failed';
-          q.explanation = `${first.fullText || q.answerLine}\n\n⚠ Lượt đối soát lỗi: ${secondErr.message}`.trim();
-        });
-        renderQuestions();
-        renderMatrix();
-        globalStart += batch.length;
-        continue;
-      }
+        // Lượt 2: Giải độc lập từ ảnh gốc với Profile 2 (KHÔNG nhìn đáp án lượt 1!)
+        state.currentProcessStage = `Đang kiểm tra chéo độc lập Lượt 2 (${verifierProfile.name})${batchLabel}...`;
+        updateResultBanner();
+        showToast(state.currentProcessStage, 'info');
 
-      const arbitrationCandidates = [];
-      for (let i = 0; i < batch.length; i++) {
-        const f = firstPass[i];
-        const s2 = secondPass[i];
-        if (f.letter !== '?' && s2.letter !== '?' && f.letter !== s2.letter) {
-          arbitrationCandidates.push({ localIndex: i, first: f, second: s2, question: batch[i] });
-        }
-      }
-
-      let arbitrationByIndex = new Map();
-      if (arbitrationCandidates.length > 0) {
-        showToast(`⚠ ${arbitrationCandidates.length} câu lệch đáp án → phân xử lượt 3${batchLabel}...`, 'info');
+        let secondPass;
         try {
-          const arbitrationImages = arbitrationCandidates.map(c => c.question);
-          const arbitrationInput = arbitrationCandidates.map(c => ({
-            first: { question: c.first.questionLine, answer_letter: c.first.letter, answer_text: c.first.answerLine },
-            second: { question: c.second.questionLine, answer_letter: c.second.letter, answer_text: c.second.answerLine }
-          }));
-          const rawThird = await callGeminiBatchApi(arbitrationImages, getArbitrationPrompt(arbitrationInput), 'arbitration');
-          const thirdPass = normalizeParsedBatch(
-            normalizeStructuredItems(rawThird, arbitrationImages.length),
-            arbitrationImages.length,
-            0
-          );
-          arbitrationCandidates.forEach((c, i) => arbitrationByIndex.set(c.localIndex, thirdPass[i]));
-        } catch (thirdErr) {
-          console.error('Lỗi phân xử:', thirdErr);
-          showToast(`Không hoàn tất được lượt phân xử${batchLabel}: ${thirdErr.message}`, 'error');
+          const rawSecond = await callGeminiApiForProfile(verifierProfile, batch, getIndependentVerifierPrompt(batch.length), 'second');
+          secondPass = parseStructuredJson(rawSecond, batch.length);
+        } catch (secondErr) {
+          console.error('Lỗi Lượt 2:', secondErr);
+          // Giữ kết quả lượt 1 nếu lượt 2 gặp lỗi (Section 12)
+          batch.forEach((q, idx) => {
+            q.status = 'warning';
+            q.check2 = '!';
+            q.answerLine += ` (Lượt 2 lỗi: ${secondErr.message})`;
+          });
+          renderQuestions();
+          renderMatrix();
+          globalStartIndex += batch.length;
+          continue;
+        }
+
+        // Đối Soát Lượt 1 vs Lượt 2
+        state.currentProcessStage = `Đang đối chiếu kết quả 2 lượt${batchLabel}...`;
+        updateResultBanner();
+
+        const conflicts = [];
+
+        batch.forEach((q, idx) => {
+          const f = firstPass[idx] || {};
+          const s = secondPass[idx] || {};
+          q.check1 = f.answerLetter || '?';
+          q.check2 = s.answerLetter || '?';
+
+          const isAgreed = q.check1 !== '?' && q.check1 === q.check2;
+
+          if (isAgreed) {
+            // Section 5: ✓ Hai lượt thống nhất
+            q.letter = q.check1;
+            q.status = 'done';
+            q.confidence = 'agreed';
+            q.questionLine = cleanQuestionLine(s.questionText || f.questionText, globalStartIndex + idx);
+            q.answerLine = cleanAnswerLine(q.letter, s.answerText || f.answerText);
+          } else {
+            // Section 6: ⚠ Hai lượt không thống nhất
+            q.letter = '?';
+            q.status = 'warning';
+            q.confidence = 'conflict';
+            q.questionLine = cleanQuestionLine(f.questionText || s.questionText, globalStartIndex + idx);
+            q.answerLine = `⚠ Lệch đáp án (Lượt 1: ${q.check1} • Lượt 2: ${q.check2})`;
+
+            conflicts.push({
+              localIndex: idx,
+              question: q,
+              first: f,
+              second: s
+            });
+          }
+        });
+
+        // Phân Xử Lượt 3 (Nếu có bất đồng & Đã cấu hình Profile 3)
+        if (conflicts.length > 0 && arbitratorProfile && arbitratorProfile.apiKey) {
+          state.currentProcessStage = `Có ${conflicts.length} câu cần phân xử Lượt 3 (${arbitratorProfile.name})${batchLabel}...`;
+          updateResultBanner();
+          showToast(state.currentProcessStage, 'info');
+
+          try {
+            const conflictImages = conflicts.map(c => c.question);
+            const rawArbitration = await callGeminiApiForProfile(
+              arbitratorProfile,
+              conflictImages,
+              getArbitrationPrompt(conflicts),
+              'arbitration'
+            );
+            const arbitrationResults = parseStructuredJson(rawArbitration, conflictImages.length);
+
+            conflicts.forEach((c, cIdx) => {
+              const res = arbitrationResults[cIdx];
+              if (res && res.answerLetter && res.answerLetter !== '?' && !res.uncertain) {
+                c.question.letter = res.answerLetter;
+                c.question.status = 'done';
+                c.question.confidence = 'arbitrated';
+                c.question.check3 = res.answerLetter;
+                c.question.answerLine = cleanAnswerLine(res.answerLetter, res.answerText);
+              } else {
+                c.question.letter = '?';
+                c.question.status = 'warning';
+                c.question.confidence = 'uncertain';
+                c.question.check3 = '?';
+                c.question.answerLine = 'Không xác định chắc chắn';
+              }
+            });
+          } catch (arbErr) {
+            console.error('Lỗi phân xử Lượt 3:', arbErr);
+            showToast(`Lỗi phân xử: ${arbErr.message}`, 'error');
+          }
         }
       }
 
-      applyFinalPass(batch, firstPass, secondPass, arbitrationByIndex);
       renderQuestions();
       renderMatrix();
-      globalStart += batch.length;
+      globalStartIndex += batch.length;
     }
 
-    const done = pendingQuestions.filter(q => q.status === 'done').length;
-    const warn = pendingQuestions.filter(q => q.status === 'warning').length;
-    showToast(`Hoàn tất ${done}/${pendingQuestions.length} câu${warn ? ` • ${warn} câu cần xem lại` : ''}.`, warn ? 'info' : 'success');
+    state.currentProcessStage = '✓ Đã hoàn tất xử lý';
+    updateResultBanner();
+
+    const doneCount = pendingQuestions.filter(q => q.status === 'done').length;
+    const conflictCount = pendingQuestions.filter(q => q.status === 'warning').length;
+    showToast(
+      `Hoàn tất ${doneCount}/${pendingQuestions.length} câu${conflictCount ? ` • ${conflictCount} câu cần xem lại` : ''}`,
+      conflictCount ? 'info' : 'success'
+    );
   } catch (err) {
-    console.error('Lỗi giải batch:', err);
-    pendingQuestions.forEach(q => {
-      if (q.status === 'loading') {
-        q.status = 'error';
-        q.questionLine = 'Lỗi phân tích';
-        q.answerLine = err.message || 'Lỗi gọi API';
-        q.letter = '!';
-        q.answer = '!';
-      }
-    });
-    renderQuestions();
-    renderMatrix();
+    console.error('Lỗi khi giải:', err);
+    state.currentProcessStage = `Lỗi: ${err.message}`;
+    updateResultBanner();
     showToast(`Không thể hoàn tất: ${err.message}`, 'error');
   } finally {
     elements.btnSolveAll.disabled = false;
@@ -1142,60 +1373,128 @@ async function solveAllQuestions() {
   }
 }
 
-async function solveSingleQuestion(q) {
+// Section 6: Kiểm tra lại 1 câu lẻ (Chỉ request lại câu đó, không giải lại cả 15 câu)
+async function recheckSingleQuestion(q) {
   if (!q) return;
-  const original = state.questions;
-  state.questions = [q];
+
+  const card = document.getElementById(`card-${q.id}`);
+  if (card) {
+    card.classList.add('loading');
+  }
+  q.status = 'loading';
+  renderQuestionCard(q);
+  renderMatrix();
+
+  showToast(`Đang kiểm tra lại riêng Câu ${state.questions.indexOf(q) + 1}...`, 'info');
+
   try {
-    await solveAllQuestions();
+    if (state.mode === 'lookup') {
+      const solver = getProfileById(state.lookupProfileId);
+      const raw = await callGeminiApiForProfile(solver, [q], getLookupPrompt(), 'single');
+      const parsed = parseStructuredJson(raw, 1)[0] || {};
+      const qIndex = state.questions.indexOf(q);
+
+      q.questionLine = cleanQuestionLine(parsed.questionText, qIndex);
+      q.answerLine = cleanAnswerLine(parsed.answerLetter, parsed.answerText);
+      q.letter = parsed.answerLetter || '?';
+      q.status = q.letter !== '?' ? 'done' : 'warning';
+      q.confidence = 'single-pass';
+    } else {
+      const solver = getProfileById(state.solverProfileId);
+      const verifier = getProfileById(state.verifierProfileId);
+      const arbitrator = getProfileById(state.arbitratorProfileId);
+
+      // Lượt 1
+      const raw1 = await callGeminiApiForProfile(solver, [q], getSolverPrompt(), 'single');
+      const f = parseStructuredJson(raw1, 1)[0] || {};
+
+      // Lượt 2
+      const raw2 = await callGeminiApiForProfile(verifier, [q], getIndependentVerifierPrompt(1), 'single');
+      const s = parseStructuredJson(raw2, 1)[0] || {};
+
+      q.check1 = f.answerLetter || '?';
+      q.check2 = s.answerLetter || '?';
+      const qIndex = state.questions.indexOf(q);
+
+      if (q.check1 !== '?' && q.check1 === q.check2) {
+        q.letter = q.check1;
+        q.status = 'done';
+        q.confidence = 'agreed';
+        q.questionLine = cleanQuestionLine(s.questionText || f.questionText, qIndex);
+        q.answerLine = cleanAnswerLine(q.letter, s.answerText || f.answerText);
+      } else if (arbitrator && arbitrator.apiKey) {
+        // Phân xử
+        const conflict = [{ first: f, second: s, question: q }];
+        const raw3 = await callGeminiApiForProfile(arbitrator, [q], getArbitrationPrompt(conflict), 'arbitration');
+        const arb = parseStructuredJson(raw3, 1)[0] || {};
+
+        if (arb.answerLetter && arb.answerLetter !== '?' && !arb.uncertain) {
+          q.letter = arb.answerLetter;
+          q.status = 'done';
+          q.confidence = 'arbitrated';
+          q.check3 = arb.answerLetter;
+          q.answerLine = cleanAnswerLine(arb.answerLetter, arb.answerText);
+        } else {
+          q.letter = '?';
+          q.status = 'warning';
+          q.confidence = 'uncertain';
+          q.answerLine = 'Không xác định chắc chắn';
+        }
+      } else {
+        q.letter = '?';
+        q.status = 'warning';
+        q.confidence = 'conflict';
+        q.answerLine = `⚠ Lệch đáp án (Lượt 1: ${q.check1} • Lượt 2: ${q.check2})`;
+      }
+    }
+
+    showToast(`Đã kiểm tra xong Câu ${state.questions.indexOf(q) + 1}!`, 'success');
+  } catch (err) {
+    q.status = 'warning';
+    showToast(`Lỗi kiểm tra lại: ${err.message}`, 'error');
   } finally {
-    state.questions = original;
-    renderQuestions();
+    renderQuestionCard(q);
     renderMatrix();
     updateQuestionCounters();
+    updateRequestStatsDisplay();
   }
 }
 
 async function retryFailedQuestions() {
-  const failed = state.questions.filter(q => q.status === 'error' || q.status === 'warning' || !q.answerLine || q.letter === '?' || q.letter === '!');
+  const failed = state.questions.filter(q => q.status === 'error' || q.status === 'warning' || q.letter === '?');
   if (failed.length === 0) {
     showToast('Không có câu lỗi cần giải lại.', 'success');
     return;
   }
 
-  const oldQuestions = state.questions;
-  state.questions = failed;
-  await solveAllQuestions();
-  state.questions = oldQuestions;
-  renderQuestions();
-  renderMatrix();
-  updateQuestionCounters();
+  showToast(`Đang giải lại ${failed.length} câu lỗi...`);
+  for (const q of failed) {
+    await recheckSingleQuestion(q);
+  }
 }
 
 // ==========================================
-// 6. UI Rendering & Matrix Bar (Mobile-Optimized)
+// 11. UI Rendering: Cards & Matrix Bar
 // ==========================================
-
 function renderMatrix() {
   const container = elements.matrixGrid;
+  if (!container) return;
   container.innerHTML = '';
 
   if (state.questions.length === 0) {
-    container.innerHTML = '<div class="matrix-empty">Chưa có ảnh câu hỏi nào. Chạm nút "CHỤP ẢNH / TẢI ẢNH" bên dưới!</div>';
-    elements.matrixStats.textContent = '(0/0 câu)';
-    elements.matrixProgressFill.style.width = '0%';
+    container.innerHTML = '<div class="matrix-empty">Chưa có ảnh câu hỏi. Chạm tải ảnh bên dưới!</div>';
+    if (elements.matrixStats) elements.matrixStats.textContent = '(0/0)';
     return;
   }
 
-  const doneCount = state.questions.filter(q => q.status === 'done' || q.status === 'warning').length;
-  elements.matrixStats.textContent = `(${doneCount}/${state.questions.length} câu xong)`;
-  elements.matrixProgressFill.style.width = `${(doneCount / state.questions.length) * 100}%`;
+  const doneCount = state.questions.filter(q => q.status === 'done').length;
+  if (elements.matrixStats) elements.matrixStats.textContent = `(${doneCount}/${state.questions.length})`;
 
   state.questions.forEach((q, index) => {
     const item = document.createElement('div');
     item.className = `matrix-item ${q.status}`;
     item.id = `matrix-badge-${q.id}`;
-    item.title = `Chạm để nhảy tới Câu ${index + 1}`;
+    item.title = `Chạm để tới Câu ${index + 1}`;
 
     const numSpan = document.createElement('span');
     numSpan.className = 'matrix-item-num';
@@ -1213,7 +1512,7 @@ function renderMatrix() {
       if (card) {
         card.scrollIntoView({ behavior: 'smooth', block: 'center' });
         card.style.outline = '2px solid #06b6d4';
-        setTimeout(() => card.style.outline = 'none', 1500);
+        setTimeout(() => card.style.outline = 'none', 1400);
       }
     });
 
@@ -1223,6 +1522,7 @@ function renderMatrix() {
 
 function renderQuestions() {
   const grid = elements.questionsGrid;
+  if (!grid) return;
   grid.innerHTML = '';
 
   state.questions.forEach((q, index) => {
@@ -1240,12 +1540,11 @@ function renderQuestionCard(q) {
 
   if (existingCard) {
     existingCard.replaceWith(newCard);
-  } else {
+  } else if (elements.questionsGrid) {
     elements.questionsGrid.appendChild(newCard);
   }
 }
 
-// Generate Question Card with Gemini Response Card Layout
 function createQuestionCardElement(q, index) {
   const card = document.createElement('div');
   card.className = `gemini-response-card status-${q.status}`;
@@ -1253,15 +1552,36 @@ function createQuestionCardElement(q, index) {
 
   const statusLabels = {
     idle: 'Chờ giải',
-    loading: 'Gemini đang giải...',
+    loading: 'Đang xử lý...',
     done: 'Hoàn tất',
-    warning: 'Đối soát lệch',
+    warning: 'Cần xem lại',
     error: 'Lỗi'
   };
 
-  // Determine display question text
-  const displayQ = q.questionLine || `Câu hỏi ${index + 1}`;
+  const displayQ = q.questionLine || cleanQuestionLine(q.name, index);
   const displayA = q.answerLine || (q.status === 'loading' ? '' : 'Chưa có đáp án. Bấm GIẢI để xem.');
+
+  // Agreement Badges
+  let agreementBadgeHtml = '';
+  let conflictBoxHtml = '';
+
+  if (state.mode === 'cross_check') {
+    if (q.confidence === 'agreed' || (q.check1 && q.check1 === q.check2 && q.check1 !== '?')) {
+      agreementBadgeHtml = `<span class="card-agreement-badge badge-agreed">✓ Hai lượt thống nhất (${q.check1})</span>`;
+    } else if (q.confidence === 'arbitrated') {
+      agreementBadgeHtml = `<span class="card-agreement-badge badge-arbitrated">⚖ Đã phân xử: ${q.letter}</span>`;
+    } else if (q.confidence === 'conflict' || (q.check1 && q.check2 && q.check1 !== q.check2)) {
+      agreementBadgeHtml = `<span class="card-agreement-badge badge-conflict">⚠ Lệch: L1 (${q.check1 || '?'}) vs L2 (${q.check2 || '?'})</span>`;
+      conflictBoxHtml = `
+        <div class="conflict-action-box">
+          <div class="conflict-desc">⚠ Lượt 1: <b>${q.check1 || '?'}</b> • Lượt 2: <b>${q.check2 || '?'}</b></div>
+          <button type="button" class="btn-recheck-single" data-qid="${q.id}">
+            🎯 Kiểm tra lại câu này
+          </button>
+        </div>
+      `;
+    }
+  }
 
   card.innerHTML = `
     <div class="card-top-bar">
@@ -1274,9 +1594,7 @@ function createQuestionCardElement(q, index) {
       </div>
       <div class="card-right-actions">
         <span class="card-status-pill status-pill-${q.status}">${statusLabels[q.status] || q.status}</span>
-        <button class="btn-card-copy btn-quick-copy" title="Copy câu này">
-          📋
-        </button>
+        <button class="btn-card-copy btn-quick-copy" title="Copy câu này">📋</button>
       </div>
     </div>
 
@@ -1286,7 +1604,7 @@ function createQuestionCardElement(q, index) {
       <div class="card-zoom-badge">Phóng to</div>
     </div>
 
-    <!-- Gemini Response Bubble Content -->
+    <!-- Response Content: Exact Question / Answer Line Format -->
     <div class="card-bubble-content">
       <div class="question-bubble">
         <div class="bubble-tag-q">❓ CÂU HỎI:</div>
@@ -1296,11 +1614,13 @@ function createQuestionCardElement(q, index) {
       <div class="answer-bubble ${q.status === 'done' ? 'ready' : ''}">
         <div class="bubble-tag-a">
           <span>✨ ĐÁP ÁN ĐÚNG:</span>
+          ${agreementBadgeHtml}
         </div>
-        ${q.status === 'loading' 
-          ? '<div class="gemini-loading-wave"></div>' 
+        ${q.status === 'loading'
+          ? '<div class="gemini-loading-wave"></div>'
           : `<div class="bubble-text-a">${escapeHtml(displayA)}</div>`
         }
+        ${conflictBoxHtml}
       </div>
     </div>
 
@@ -1314,7 +1634,7 @@ function createQuestionCardElement(q, index) {
     </div>
   `;
 
-  // Toggle image preview
+  // Toggle image
   const toggleBtn = card.querySelector(`#toggle-img-${q.id}`);
   const imgBox = card.querySelector(`#img-box-${q.id}`);
   toggleBtn.addEventListener('click', () => {
@@ -1335,7 +1655,7 @@ function createQuestionCardElement(q, index) {
     elements.imageZoomModal.classList.remove('hidden');
   });
 
-  // Quick Copy Single Question (Exact 2-line format)
+  // Copy single question in exact 2-line format
   const btnQuickCopy = card.querySelector('.btn-quick-copy');
   btnQuickCopy.addEventListener('click', () => {
     const singleText = `${displayQ}\n${displayA}`;
@@ -1344,32 +1664,169 @@ function createQuestionCardElement(q, index) {
     });
   });
 
-  // Re-solve single question
+  // Re-resolve
   const btnReSolve = card.querySelector('.btn-re-solve');
-  btnReSolve.addEventListener('click', () => solveSingleQuestion(q));
+  btnReSolve.addEventListener('click', () => recheckSingleQuestion(q));
 
-  // Delete question
+  // Single recheck button in conflict box
+  const btnRecheckSingle = card.querySelector('.btn-recheck-single');
+  if (btnRecheckSingle) {
+    btnRecheckSingle.addEventListener('click', () => recheckSingleQuestion(q));
+  }
+
+  // Delete
   const btnDel = card.querySelector('.btn-del-q');
   btnDel.addEventListener('click', () => {
     state.questions = state.questions.filter(item => item.id !== q.id);
     updateQuestionCounters();
     renderQuestions();
     renderMatrix();
+    updateResultBanner();
   });
 
   return card;
 }
 
 // ==========================================
-// 7. Copy & Export Helpers (Exact SEB Format)
+// 12. File Upload & Camera Handler
 // ==========================================
+async function handleFiles(files, isPasted = false) {
+  const imageFiles = files.filter(f => f.type.startsWith('image/'));
+  if (imageFiles.length === 0) {
+    showToast('Vui lòng chỉ chọn file hình ảnh (PNG, JPG, JPEG, WEBP)!', 'error');
+    return;
+  }
 
+  const remainingSlots = state.maxImagesPerRequest - state.questions.length;
+  if (remainingSlots <= 0) {
+    showToast(`Đã đủ ${state.maxImagesPerRequest} ảnh. Vui lòng giải hoặc xóa bớt trước.`, 'error');
+    return;
+  }
+
+  const acceptedFiles = imageFiles.slice(0, remainingSlots);
+  if (imageFiles.length > acceptedFiles.length) {
+    showToast(`Tối đa ${state.maxImagesPerRequest} ảnh/lần. Đã nhận ${acceptedFiles.length} ảnh.`, 'error');
+  } else {
+    showToast(`Đang xử lý ${acceptedFiles.length} ảnh...`);
+  }
+
+  for (let file of acceptedFiles) {
+    try {
+      const prepared = await prepareImageForUpload(file);
+      const newQuestion = {
+        id: 'q_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
+        name: isPasted ? `Ảnh dán ${state.questions.length + 1}.jpg` : file.name,
+        base64: prepared.base64,
+        mimeType: prepared.mimeType,
+        dataUrl: prepared.dataUrl,
+        originalDataUrl: prepared.dataUrl,
+        status: 'idle',
+        questionLine: '',
+        answerLine: '',
+        letter: '?',
+        confidence: 'pending',
+        check1: null,
+        check2: null,
+        check3: null,
+        isImageOpen: false
+      };
+      state.questions.push(newQuestion);
+    } catch (err) {
+      console.error('Lỗi đọc ảnh:', err);
+    }
+  }
+
+  updateQuestionCounters();
+  renderQuestions();
+  renderMatrix();
+  updateResultBanner();
+  showToast(`Đã thêm thành công! Tổng cộng: ${state.questions.length} ảnh.`);
+}
+
+function readFileAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+async function prepareImageForUpload(file) {
+  const originalUrl = await readFileAsDataURL(file);
+  const image = await new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = originalUrl;
+  });
+
+  const maxDimension = 1800;
+  const scale = Math.min(1, maxDimension / Math.max(image.naturalWidth, image.naturalHeight));
+  const width = Math.max(1, Math.round(image.naturalWidth * scale));
+  const height = Math.max(1, Math.round(image.naturalHeight * scale));
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d', { alpha: false });
+  ctx.drawImage(image, 0, 0, width, height);
+
+  const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
+  return {
+    dataUrl,
+    base64: dataUrl.split(',')[1],
+    mimeType: 'image/jpeg'
+  };
+}
+
+function updateQuestionCounters() {
+  const total = state.questions.length;
+  if (elements.totalQuestionsCount) elements.totalQuestionsCount.textContent = total;
+  if (elements.mobileQuestionCount) elements.mobileQuestionCount.textContent = total;
+  if (elements.btnSolveAll) elements.btnSolveAll.disabled = total === 0;
+  if (elements.btnMobileSolve) elements.btnMobileSolve.disabled = total === 0;
+  if (elements.btnExportReport) elements.btnExportReport.disabled = total === 0;
+
+  const failedCount = state.questions.filter(q => q.status === 'error' || q.status === 'warning' || q.letter === '?').length;
+  if (elements.btnRetryFailed) elements.btnRetryFailed.disabled = total === 0 || failedCount === 0;
+}
+
+function sortQuestionsNatural() {
+  if (state.questions.length <= 1) return;
+
+  state.questions.sort((a, b) => {
+    const numA = (a.name.match(/\d+/) ? parseInt(a.name.match(/\d+/)[0], 10) : null);
+    const numB = (b.name.match(/\d+/) ? parseInt(b.name.match(/\d+/)[0], 10) : null);
+    if (numA !== null && numB !== null) return numA - numB;
+    return a.name.localeCompare(b.name, undefined, { numeric: true });
+  });
+
+  renderQuestions();
+  renderMatrix();
+  showToast('Đã sắp xếp câu hỏi tự nhiên (1 ➔ 15)!', 'success');
+}
+
+function clearAllQuestions() {
+  if (state.questions.length === 0) return;
+  if (!confirm('Bạn có chắc chắn muốn xóa toàn bộ danh sách ảnh?')) return;
+  state.questions = [];
+  updateQuestionCounters();
+  renderQuestions();
+  renderMatrix();
+  updateResultBanner();
+  showToast('Đã xóa hết câu hỏi.');
+}
+
+// ==========================================
+// 13. Copy & Export Helpers (Exact SEB Format)
+// ==========================================
 function getFormattedSebText() {
   if (state.questions.length === 0) return '';
   return state.questions.map((q, idx) => {
-    const qText = q.questionLine || `Câu hỏi ${idx + 1}`;
-    const aText = q.answerLine || 'Chưa có đáp án';
-    return `${qText}\n${aText}`;
+    const qLine = q.questionLine || cleanQuestionLine(q.name, idx);
+    const aLine = q.answerLine || 'Chưa có đáp án';
+    return `${qLine}\n${aLine}`;
   }).join('\n\n');
 }
 
@@ -1378,9 +1835,8 @@ function copyAllAnswers() {
     showToast('Chưa có câu hỏi nào để copy!', 'error');
     return;
   }
-
-  const fullText = getFormattedSebText();
-  navigator.clipboard.writeText(fullText).then(() => {
+  const text = getFormattedSebText();
+  navigator.clipboard.writeText(text).then(() => {
     showToast(`📋 Đã copy toàn bộ ${state.questions.length} câu theo chuẩn SEB!`, 'success');
   }).catch(() => {
     showToast('Không thể truy cập Clipboard!', 'error');
@@ -1391,7 +1847,7 @@ function copyInlineFormat() {
   if (state.questions.length === 0) return;
   const inline = state.questions.map((q, idx) => `${idx + 1}.${q.letter || '?'}`).join('  |  ');
   navigator.clipboard.writeText(inline).then(() => {
-    showToast('📋 Đã copy dạng chuỗi ngang!', 'success');
+    showToast('📋 Đã copy chuỗi ngang!', 'success');
   });
 }
 
@@ -1399,7 +1855,7 @@ function copyLettersOnly() {
   if (state.questions.length === 0) return;
   const letters = state.questions.map(q => q.letter || '?').join(' ');
   navigator.clipboard.writeText(letters).then(() => {
-    showToast('🔤 Đã copy danh sách chữ cái đáp án!', 'success');
+    showToast('🔤 Đã copy dãy chữ cái!', 'success');
   });
 }
 
@@ -1416,150 +1872,84 @@ function downloadTxtFile() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `FastExam_SEB_DapAn_${new Date().toISOString().slice(0, 10)}.txt`;
+  a.download = `FastExam_SEB_${new Date().toISOString().slice(0, 10)}.txt`;
   a.click();
   URL.revokeObjectURL(url);
-  showToast('Đã tải xuống file đáp án!', 'success');
+  showToast('Đã tải xuống file .txt!', 'success');
 }
 
 // ==========================================
-// 8. Demo Generator (15 Sample SEB Questions)
+// 14. Demo Generator (15 Sample Questions)
 // ==========================================
 function loadDemoQuestions() {
-  showToast('Đang tạo 15 câu hỏi mẫu chuẩn đề thi SEB...');
+  showToast('Đang tạo 15 câu hỏi mẫu chuẩn SEB...');
 
-  const sampleData = [
-    {
-      q: 'Câu hỏi 1: Đạo hàm của hàm số y = x^3 - 3x^2 + 2 là?',
-      a: 'A. y\' = 3x^2 - 6x',
-      opts: ['A. y\' = 3x^2 - 6x', 'B. y\' = 3x^2 - 3x', 'C. y\' = x^2 - 6x', 'D. y\' = 3x^2 + 6x']
-    },
-    {
-      q: 'Câu hỏi 2: Chu kỳ dao động điều hòa của con lắc đơn được tính theo công thức?',
-      a: 'B. T = 2π√(l/g)',
-      opts: ['A. T = 2π√(g/l)', 'B. T = 2π√(l/g)', 'C. T = 2π√(m/k)', 'D. T = 2π√(k/m)']
-    },
-    {
-      q: 'Câu hỏi 3: Thủy phân este Etyl axetat trong môi trường kiềm (NaOH) sinh ra muối nào?',
-      a: 'C. CH3COONa',
-      opts: ['A. HCOONa', 'B. C2H5COONa', 'C. CH3COONa', 'D. CH3COOH']
-    },
-    {
-      q: 'Câu hỏi 4: She ____ in Hanoi for 10 years before moving to Da Nang.',
-      a: 'D. had lived',
-      opts: ['A. lives', 'B. has lived', 'C. is living', 'D. had lived']
-    },
-    {
-      q: 'Câu hỏi 5: Năm 1945, sự kiện lịch sử trọng đại nào diễn ra tại Quảng trường Ba Đình?',
-      a: 'A. Bác Hồ đọc Tuyên ngôn Độc lập',
-      opts: ['A. Bác Hồ đọc Tuyên ngôn Độc lập', 'B. Chiến thắng Điện Biên Phủ', 'C. Khởi nghĩa Nam Kỳ', 'D. Thành lập Đảng']
-    },
-    {
-      q: 'Câu hỏi 6: Đỉnh núi Fansipan có độ cao chính xác là bao nhiêu mét?',
-      a: 'B. 3.143 m',
-      opts: ['A. 3.114 m', 'B. 3.143 m', 'C. 3.200 m', 'D. 2.980 m']
-    },
-    {
-      q: 'Kim loại nào sau đây có độ dẫn điện tốt nhất ở điều kiện thường?',
-      a: 'A. Bạc (Ag)',
-      opts: ['A. Bạc (Ag)', 'B. Đồng (Cu)', 'C. Vàng (Au)', 'D. Nhôm (Al)']
-    },
-    {
-      q: 'Câu hỏi 8: Đơn vị đo cường độ dòng điện trong hệ đo lường quốc tế SI là gì?',
-      a: 'C. Ampe (A)',
-      opts: ['A. Vôn (V)', 'B. Ôm (Ω)', 'C. Ampe (A)', 'D. Oát (W)']
-    },
-    {
-      q: 'Câu hỏi 9: Giá trị của tích phân I = ∫ (0 đến 1) 2x dx bằng bao nhiêu?',
-      a: 'A. 1',
-      opts: ['A. 1', 'B. 2', 'C. 0', 'D. 0.5']
-    },
-    {
-      q: 'Trong mạng máy tính, 1 Byte tương đương với bao nhiêu Bit?',
-      a: 'B. 8 bit',
-      opts: ['A. 4 bit', 'B. 8 bit', 'C. 16 bit', 'D. 32 bit']
-    },
-    {
-      q: 'Câu hỏi 11: Cho tam giác vuông có hai cạnh góc vuông là 3cm và 4cm. Độ dài cạnh huyền là?',
-      a: 'D. 5 cm',
-      opts: ['A. 6 cm', 'B. 7 cm', 'C. 4.5 cm', 'D. 5 cm']
-    },
-    {
-      q: 'Câu hỏi 12: Tế bào quang điện hoạt động dựa trên hiện tượng vật lý nào?',
-      a: 'C. Hiện tượng quang điện trong',
-      opts: ['A. Tán sắc ánh sáng', 'B. Giao thoa ánh sáng', 'C. Hiện tượng quang điện trong', 'D. Phản xạ ánh sáng']
-    },
-    {
-      q: 'Câu hỏi 13: Thành phần chính của khí thiên nhiên là khí nào?',
-      a: 'A. Metan (CH4)',
-      opts: ['A. Metan (CH4)', 'B. Etan (C2H6)', 'C. Propan (C3H8)', 'D. Butan (C4H10)']
-    },
-    {
-      q: 'Vận tốc ánh sáng truyền trong chân không xấp xỉ bằng bao nhiêu?',
-      a: 'B. 3 x 10^8 m/s',
-      opts: ['A. 3 x 10^6 m/s', 'B. 3 x 10^8 m/s', 'C. 3 x 10^5 km/h', 'D. 340 m/s']
-    },
-    {
-      q: 'Câu hỏi 15: Từ nào sau đây đồng nghĩa với "Crucial"?',
-      a: 'C. Essential',
-      opts: ['A. Minor', 'B. Optional', 'C. Essential', 'D. Temporary']
-    }
+  const sampleQuestions = [
+    { q: 'Đạo hàm của hàm số y = x^3 - 3x^2 + 2 là gì?', a: 'A. y\' = 3x^2 - 6x', l: 'A', c1: 'A', c2: 'A' },
+    { q: 'Chu kỳ dao động điều hòa của con lắc đơn tính theo công thức nào?', a: 'B. T = 2π√(l/g)', l: 'B', c1: 'B', c2: 'B' },
+    { q: 'Thủy phân este Etyl axetat trong dung dịch NaOH tạo thành muối gì?', a: 'C. CH3COONa', l: 'C', c1: 'C', c2: 'C' },
+    { q: 'She ____ in Hanoi for 10 years before moving to Da Nang.', a: 'D. had lived', l: 'D', c1: 'D', c2: 'D' },
+    { q: 'Năm 1945, Bác Hồ đọc Tuyên ngôn Độc lập tại quảng trường nào?', a: 'A. Quảng trường Ba Đình', l: 'A', c1: 'A', c2: 'A' },
+    { q: 'Độ cao đỉnh núi Fansipan là bao nhiêu mét?', a: 'B. 3.143 m', l: 'B', c1: 'B', c2: 'B' },
+    { q: 'Kim loại nào sau đây có khả năng dẫn điện tốt nhất ở điều kiện thường?', a: 'A. Bạc (Ag)', l: 'A', c1: 'A', c2: 'A' },
+    { q: 'Đơn vị đo điện trở trong hệ đo lường quốc tế SI là gì?', a: 'C. Ôm (Ω)', l: 'C', c1: 'C', c2: 'C' },
+    { q: 'Giá trị của tích phân I = ∫ (0 đến 1) 2x dx bằng bao nhiêu?', a: 'A. 1', l: 'A', c1: 'A', c2: 'A' },
+    { q: 'Trong kiến trúc máy tính, 1 Byte tương đương với bao nhiêu Bit?', a: 'B. 8 bit', l: 'B', c1: 'B', c2: 'B' },
+    { q: 'Định luật vạn vật hấp dẫn do nhà bác học nào phát minh?', a: 'D. Isaac Newton', l: 'D', c1: 'D', c2: 'D' },
+    // Câu 12 cố tình tạo tình huống lệch để minh họa Kiểm tra chéo & phân xử!
+    { q: 'Thủ đô của nước Úc (Australia) là thành phố nào?', a: 'C. Canberra', l: 'C', c1: 'C', c2: 'B', isConflict: true },
+    { q: 'Khí nào chiếm tỉ lệ phần trăm thể tích lớn nhất trong không khí?', a: 'A. Nitơ (khoảng 78%)', l: 'A', c1: 'A', c2: 'A' },
+    { q: 'Vận tốc ánh sáng truyền trong chân không xấp xỉ bằng bao nhiêu?', a: 'B. 3 x 10^8 m/s', l: 'B', c1: 'B', c2: 'B' },
+    { q: 'Từ nào sau đây đồng nghĩa với từ "Crucial"?', a: 'C. Essential', l: 'C', c1: 'C', c2: 'C' }
   ];
 
-  state.questions = sampleData.map((item, idx) => {
-    // Generate clean Canvas mock image
+  state.questions = sampleQuestions.map((item, idx) => {
     const canvas = document.createElement('canvas');
-    canvas.width = 600;
+    canvas.width = 620;
     canvas.height = 240;
     const ctx = canvas.getContext('2d');
 
-    // Background
+    // Canvas Card Render
     ctx.fillStyle = '#0f172a';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    // Border
     ctx.strokeStyle = '#334155';
     ctx.lineWidth = 3;
     ctx.strokeRect(10, 10, canvas.width - 20, canvas.height - 20);
 
-    // Header badge
     ctx.fillStyle = '#6366f1';
-    ctx.fillRect(20, 20, 130, 32);
+    ctx.fillRect(20, 20, 140, 32);
     ctx.fillStyle = '#ffffff';
     ctx.font = 'bold 15px sans-serif';
     ctx.fillText(`ĐỀ THI SEB #${idx + 1}`, 30, 42);
 
-    // Question Text
     ctx.fillStyle = '#f8fafc';
-    ctx.font = 'bold 17px sans-serif';
-    ctx.fillText(item.q.length > 50 ? item.q.substring(0, 48) + '...' : item.q, 20, 85);
+    ctx.font = 'bold 16px sans-serif';
+    ctx.fillText(item.q.length > 52 ? item.q.substring(0, 50) + '...' : item.q, 20, 85);
 
-    // Options
-    ctx.font = '15px sans-serif';
-    ctx.fillStyle = '#cbd5e1';
-    ctx.fillText(item.opts[0] + '          ' + item.opts[1], 30, 135);
-    ctx.fillText(item.opts[2] + '          ' + item.opts[3], 30, 180);
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '14px sans-serif';
+    ctx.fillText('A. Phương án 1                 B. Phương án 2', 30, 135);
+    ctx.fillText('C. Phương án 3                 D. Phương án 4', 30, 175);
 
-    const dataUrl = canvas.toDataURL('image/png');
-    const base64 = dataUrl.split(',')[1];
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
 
-    const parsed = parseAnswerResponse(`${item.q}\n${item.a}`);
+    const isConf = Boolean(item.isConflict);
 
     return {
       id: 'demo_' + (idx + 1),
-      name: `cau_${idx + 1}.png`,
-      base64: base64,
-      mimeType: 'image/png',
+      name: `cau_${idx + 1}.jpg`,
+      base64: dataUrl.split(',')[1],
+      mimeType: 'image/jpeg',
       dataUrl: dataUrl,
-      status: 'done',
-      questionLine: parsed.questionLine,
-      answerLine: parsed.answerLine,
-      letter: parsed.letter,
-      answer: parsed.letter,
-      explanation: parsed.fullText,
-      confidence: 'high',
-      check1: parsed.letter,
-      check2: parsed.letter,
+      originalDataUrl: dataUrl,
+      status: isConf ? 'warning' : 'done',
+      questionLine: `Câu ${idx + 1}: ${item.q}`,
+      answerLine: isConf ? '⚠ Lệch đáp án (Lượt 1: C • Lượt 2: B)' : item.a,
+      letter: isConf ? '?' : item.l,
+      confidence: isConf ? 'conflict' : 'agreed',
+      check1: item.c1,
+      check2: item.c2,
+      check3: null,
       isImageOpen: false
     };
   });
@@ -1567,18 +1957,16 @@ function loadDemoQuestions() {
   updateQuestionCounters();
   renderQuestions();
   renderMatrix();
-  showToast('Đã tải thành công 15 câu hỏi mẫu chuẩn SEB!', 'success');
+  updateResultBanner();
+  showToast('Đã tải 15 câu mẫu (Câu 12 mô phỏng trường hợp lệch đối soát)!', 'success');
 }
 
 // ==========================================
-// 9. Exam Timer Logic (15 Mins)
+// 15. Exam Timer & Sound FX
 // ==========================================
 function toggleTimer() {
-  if (state.timer.isRunning) {
-    pauseTimer();
-  } else {
-    startTimer();
-  }
+  if (state.timer.isRunning) pauseTimer();
+  else startTimer();
 }
 
 function startTimer() {
@@ -1620,7 +2008,6 @@ function updateTimerDisplay() {
   const s = state.timer.remainingSeconds % 60;
   elements.timerDisplay.textContent = `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
 
-  // Warning when < 3 minutes
   if (state.timer.remainingSeconds <= 3 * 60 && state.timer.remainingSeconds > 0) {
     elements.timerWidget.classList.add('warning');
   } else {
@@ -1628,9 +2015,6 @@ function updateTimerDisplay() {
   }
 }
 
-// ==========================================
-// 10. Audio Synthesizer & Utility Helpers
-// ==========================================
 function playCompletionSound() {
   try {
     const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -1638,25 +2022,22 @@ function playCompletionSound() {
     const gain = audioCtx.createGain();
 
     osc.type = 'sine';
-    osc.frequency.setValueAtTime(587.33, audioCtx.currentTime); // D5
-    osc.frequency.exponentialRampToValueAtTime(880, audioCtx.currentTime + 0.15); // A5
+    osc.frequency.setValueAtTime(587.33, audioCtx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(880, audioCtx.currentTime + 0.15);
 
     gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
     gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.4);
 
     osc.connect(gain);
     gain.connect(audioCtx.destination);
-
     osc.start();
     osc.stop(audioCtx.currentTime + 0.4);
-  } catch (err) {
-    // Ignore audio autoplay restrictions
-  }
+  } catch (_) {}
 }
 
 function escapeHtml(text) {
   if (!text) return '';
-  return text
+  return String(text)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -1673,11 +2054,178 @@ function showToast(message, type = 'info') {
 
   toastTimeout = setTimeout(() => {
     elements.toast.classList.add('hidden');
-  }, 3000);
+  }, 3200);
 }
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ==========================================
+// 16. Event Listeners Setup
+// ==========================================
+function setupEventListeners() {
+  // Timer Controls
+  elements.btnStartTimer.addEventListener('click', toggleTimer);
+  elements.btnResetTimer.addEventListener('click', resetTimer);
+
+  // Settings Modal Controls
+  elements.btnOpenSettings.addEventListener('click', () => {
+    renderProfilesList();
+    elements.settingsModal.classList.remove('hidden');
+  });
+  elements.btnCloseSettings.addEventListener('click', () => elements.settingsModal.classList.add('hidden'));
+  elements.btnCloseSettingsModal.addEventListener('click', () => elements.settingsModal.classList.add('hidden'));
+  elements.settingsModal.addEventListener('click', (e) => {
+    if (e.target === elements.settingsModal) elements.settingsModal.classList.add('hidden');
+  });
+
+  // Profile Form Controls
+  elements.btnAddNewProfile.addEventListener('click', openAddProfileForm);
+  elements.btnCancelProfileForm.addEventListener('click', closeProfileForm);
+  elements.btnCancelProfile.addEventListener('click', closeProfileForm);
+  elements.btnSaveProfileItem.addEventListener('click', saveProfileFormData);
+  elements.btnTestThisKey.addEventListener('click', testFormKey);
+
+  // Toggle API key visibility in form
+  elements.btnToggleKeyVisibility.addEventListener('click', () => {
+    const isPass = elements.inputProfileKey.type === 'password';
+    elements.inputProfileKey.type = isPass ? 'text' : 'password';
+    elements.btnToggleKeyVisibility.textContent = isPass ? '🔒' : '👁';
+  });
+
+  // Custom model input toggle in profile form
+  elements.inputProfileModel.addEventListener('change', () => {
+    if (elements.inputProfileModel.value === 'custom') {
+      elements.inputCustomModel.classList.remove('hidden');
+      elements.inputCustomModel.focus();
+    } else {
+      elements.inputCustomModel.classList.add('hidden');
+    }
+  });
+
+  // Mode Switch Tab Controls
+  elements.btnModeLookup.addEventListener('click', () => {
+    state.mode = 'lookup';
+    saveModeAndAssignments();
+    updateModeUI();
+  });
+  elements.btnModeCrossCheck.addEventListener('click', () => {
+    state.mode = 'cross_check';
+    saveModeAndAssignments();
+    updateModeUI();
+  });
+
+  // Profile Selectors Change in Mode Bar
+  if (elements.selectLookupProfile) {
+    elements.selectLookupProfile.addEventListener('change', () => {
+      state.lookupProfileId = elements.selectLookupProfile.value;
+      const p = getProfileById(state.lookupProfileId);
+      if (elements.badgeLookupModel && p) {
+        elements.badgeLookupModel.textContent = `${p.model} • ${p.thinkingLevel.toUpperCase()}`;
+      }
+      saveModeAndAssignments();
+    });
+  }
+
+  if (elements.selectCrossSolver) {
+    elements.selectCrossSolver.addEventListener('change', () => {
+      state.solverProfileId = elements.selectCrossSolver.value;
+      saveModeAndAssignments();
+    });
+  }
+
+  if (elements.selectCrossVerifier) {
+    elements.selectCrossVerifier.addEventListener('change', () => {
+      state.verifierProfileId = elements.selectCrossVerifier.value;
+      saveModeAndAssignments();
+    });
+  }
+
+  if (elements.selectCrossArbitrator) {
+    elements.selectCrossArbitrator.addEventListener('change', () => {
+      state.arbitratorProfileId = elements.selectCrossArbitrator.value;
+      saveModeAndAssignments();
+    });
+  }
+
+  // Zoom Modal
+  elements.btnCloseZoom.addEventListener('click', () => elements.imageZoomModal.classList.add('hidden'));
+  elements.imageZoomModal.addEventListener('click', (e) => {
+    if (e.target === elements.imageZoomModal) elements.imageZoomModal.classList.add('hidden');
+  });
+
+  // Export Modal
+  if (elements.btnExportReport) elements.btnExportReport.addEventListener('click', openExportModal);
+  if (elements.btnCloseExport) elements.btnCloseExport.addEventListener('click', () => elements.exportModal.classList.add('hidden'));
+  if (elements.exportModal) {
+    elements.exportModal.addEventListener('click', (e) => {
+      if (e.target === elements.exportModal) elements.exportModal.classList.add('hidden');
+    });
+  }
+  if (elements.btnCopyInline) elements.btnCopyInline.addEventListener('click', copyInlineFormat);
+  if (elements.btnCopyLettersOnly) elements.btnCopyLettersOnly.addEventListener('click', copyLettersOnly);
+  if (elements.btnCopyDetailed) elements.btnCopyDetailed.addEventListener('click', copyAllAnswers);
+  if (elements.btnPrintPdf) elements.btnPrintPdf.addEventListener('click', () => window.print());
+  if (elements.btnDownloadTxt) elements.btnDownloadTxt.addEventListener('click', downloadTxtFile);
+
+  // Drag and Drop Upload
+  elements.dropZone.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    elements.dropZone.classList.add('dragover');
+  });
+  elements.dropZone.addEventListener('dragleave', () => elements.dropZone.classList.remove('dragover'));
+  elements.dropZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    elements.dropZone.classList.remove('dragover');
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      handleFiles(Array.from(e.dataTransfer.files));
+    }
+  });
+
+  elements.fileInput.addEventListener('change', (e) => {
+    if (e.target.files && e.target.files.length > 0) {
+      handleFiles(Array.from(e.target.files));
+      elements.fileInput.value = '';
+    }
+  });
+
+  // Clipboard Paste (Ctrl + V)
+  document.addEventListener('paste', (e) => {
+    const items = (e.clipboardData || e.originalEvent?.clipboardData)?.items || [];
+    const pastedFiles = [];
+    for (let item of items) {
+      if (item.kind === 'file' && item.type.startsWith('image/')) {
+        pastedFiles.push(item.getAsFile());
+      }
+    }
+    if (pastedFiles.length > 0) {
+      handleFiles(pastedFiles, true);
+      showToast(`Đã dán ${pastedFiles.length} ảnh từ Clipboard!`, 'success');
+    }
+  });
+
+  // Toolbar Actions
+  elements.btnSolveAll.addEventListener('click', solveAllQuestions);
+  elements.btnSortQuestions.addEventListener('click', sortQuestionsNatural);
+  elements.btnRetryFailed.addEventListener('click', retryFailedQuestions);
+  elements.btnClearAll.addEventListener('click', clearAllQuestions);
+  elements.btnCopyAnswers.addEventListener('click', copyAllAnswers);
+  if (elements.btnLoadDemo) elements.btnLoadDemo.addEventListener('click', loadDemoQuestions);
+
+  // Mobile Bottom Bar Actions
+  if (elements.btnMobileSolve) elements.btnMobileSolve.addEventListener('click', solveAllQuestions);
+  if (elements.btnMobileCopyAll) elements.btnMobileCopyAll.addEventListener('click', copyAllAnswers);
+  if (elements.btnMobileDemo) elements.btnMobileDemo.addEventListener('click', loadDemoQuestions);
+
+  // Escape Key
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      elements.settingsModal.classList.add('hidden');
+      elements.imageZoomModal.classList.add('hidden');
+      if (elements.exportModal) elements.exportModal.classList.add('hidden');
+    }
+  });
 }
 
 // Start application

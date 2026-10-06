@@ -97,6 +97,53 @@
     </div>
   </section>
 
+  <!-- FastExam v2.0 Mode Bar & Profile Quick Selectors -->
+  <section class="gemini-mode-bar" id="modeBarSection">
+    <div class="mode-bar-container">
+      <!-- Mode Segmented Control -->
+      <div class="mode-toggle-group">
+        <button type="button" class="mode-tab-btn" id="btnModeLookup" data-mode="lookup">
+          <span class="tab-icon">⚡</span>
+          <span class="tab-label">Chỉ Tra (Nhanh)</span>
+        </button>
+        <button type="button" class="mode-tab-btn active" id="btnModeCrossCheck" data-mode="cross_check">
+          <span class="tab-icon">🔎</span>
+          <span class="tab-label">Kiểm Tra Chéo (Chính Xác)</span>
+        </button>
+      </div>
+
+      <!-- Quick Pickers for Lookup Mode -->
+      <div class="profile-pickers-panel" id="panelLookupProfiles" style="display: none;">
+        <div class="picker-row">
+          <label class="picker-label" for="selectLookupProfile">API Giải:</label>
+          <select id="selectLookupProfile" class="form-select-sm picker-select"></select>
+          <span class="picker-badge" id="badgeLookupModel">3.8 Flash</span>
+        </div>
+      </div>
+
+      <!-- Quick Pickers for Cross-Check Mode -->
+      <div class="profile-pickers-panel" id="panelCrossProfiles">
+        <div class="picker-grid">
+          <div class="picker-col">
+            <label class="picker-label" for="selectCrossSolver">1. API Giải:</label>
+            <select id="selectCrossSolver" class="form-select-sm picker-select"></select>
+          </div>
+          <div class="picker-col">
+            <label class="picker-label" for="selectCrossVerifier">2. API Kiểm tra:</label>
+            <select id="selectCrossVerifier" class="form-select-sm picker-select"></select>
+          </div>
+          <div class="picker-col col-arbitrator">
+            <label class="picker-label" for="selectCrossArbitrator">3. API Phân xử:</label>
+            <select id="selectCrossArbitrator" class="form-select-sm picker-select"></select>
+          </div>
+        </div>
+        <div class="cross-hint-line">
+          <span>🛡 Lượt 1 &amp; Lượt 2 giải độc lập từ ảnh • Tự đối soát • Chỉ câu lệch mới phân xử</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- Main Body Content -->
   <main class="gemini-main">
     
@@ -186,6 +233,26 @@
 
     <!-- Gemini Question Cards Container -->
     <section class="gemini-stream-section">
+      <!-- Result Overview & Realtime Progress Banner -->
+      <div class="result-status-banner hidden" id="resultStatusBanner">
+        <div class="banner-top-row">
+          <div class="banner-mode-tag" id="bannerModeTag">
+            <span class="mode-tag-icon">🔎</span>
+            <span class="mode-tag-text" id="bannerModeText">Chế độ: ✓ Kiểm tra chéo</span>
+          </div>
+          <div class="banner-stats-pill" id="bannerRequestStats">
+            Request đã dùng: 0
+          </div>
+        </div>
+        <div class="banner-profiles-row" id="bannerProfilesRow">
+          <!-- Rendered dynamically via JS -->
+        </div>
+        <div class="banner-progress-row" id="bannerProgressRow">
+          <div class="progress-spinner-dot"></div>
+          <span class="progress-text" id="bannerProgressText">Sẵn sàng</span>
+        </div>
+      </div>
+
       <div id="questionsGrid" class="questions-stream">
         <!-- Rendered dynamically via JS -->
       </div>
@@ -225,76 +292,110 @@
     </div>
   </nav>
 
-  <!-- Settings Modal -->
+  <!-- Settings Modal (API Profiles Management) -->
   <div class="modal-backdrop hidden" id="settingsModal">
-    <div class="modal-dialog gemini-glass-modal">
+    <div class="modal-dialog gemini-glass-modal modal-dialog-lg">
       <div class="modal-header">
         <div class="modal-title">
           <span class="title-sparkle">✦</span>
-          <h3>Cấu Hình API Cá Nhân</h3>
+          <h3>Quản Lý Gemini API Profiles</h3>
         </div>
         <button id="btnCloseSettings" class="btn-icon">✕</button>
       </div>
 
       <div class="modal-body">
-        <div class="form-group">
-          <label for="apiKeyInput" class="form-label">
-            <span>Gemini API Key của bạn</span>
-            <span class="form-help-link"><a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">Lấy API Key ↗</a></span>
-          </label>
-          <textarea id="apiKeyInput" class="form-textarea" rows="3" placeholder="AIzaSy..."></textarea>
-          <p class="form-hint">🔐 Mỗi người dùng tự nhập key của mình. Key chỉ lưu trong trình duyệt này và được dùng trực tiếp để gọi model đã chọn.</p>
+        <!-- Section Header with Add Button -->
+        <div class="profiles-section-header">
+          <div>
+            <div class="section-title">Danh Sách Tài Khoản API</div>
+            <div class="section-subtitle">Tự do thêm nhiều tài khoản/project Google khác nhau để đối soát chéo độc lập.</div>
+          </div>
+          <button type="button" id="btnAddNewProfile" class="btn-sm btn-primary gemini-btn-primary">
+            + Thêm Profile
+          </button>
         </div>
 
-        <div class="form-row">
-          <div class="form-group col-6">
-            <label for="modelSelect" class="form-label">Model Gemini:</label>
-            <select id="modelSelect" class="form-select">
-              <option value="gemini-3.8-flash" selected>Gemini 3.8 Flash (Khuyên dùng)</option>
-              <option value="gemini-3.7-flash">Gemini 3.7 Flash</option>
-              <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
-              <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
-              <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite</option>
-              <option value="custom">Tự nhập model khác...</option>
-            </select>
-            <input type="text" id="customModelInput" class="form-input hidden" style="margin-top: 8px;" placeholder="Ví dụ: gemini-3.8-flash">
+        <!-- Dynamic Profiles List -->
+        <div class="profiles-cards-list" id="profilesListContainer">
+          <!-- Rendered via JS -->
+        </div>
+
+        <!-- Add/Edit Profile Form Box -->
+        <div class="profile-form-box hidden" id="profileFormBox">
+          <div class="form-box-header">
+            <h4 id="profileFormTitle" style="font-size: 0.95rem; font-weight: 700; color: #fff;">Thêm API Profile</h4>
+            <button type="button" id="btnCancelProfileForm" class="btn-icon">✕</button>
           </div>
-          <div class="form-group col-6">
-            <label for="thinkingLevelSelect" class="form-label">Mức suy luận:</label>
-            <select id="thinkingLevelSelect" class="form-select">
-              <option value="low">Low — nhanh hơn</option>
-              <option value="medium">Medium — cân bằng</option>
-              <option value="high" selected>High — ưu tiên chính xác</option>
-            </select>
+          <input type="hidden" id="editProfileId" value="">
+          
+          <div class="form-group">
+            <label for="inputProfileName" class="form-label">Tên Profile:</label>
+            <input type="text" id="inputProfileName" class="form-input" placeholder="Ví dụ: Tài khoản chính, Tài khoản phụ 1...">
           </div>
-          <div class="form-group col-6">
-            <label class="form-label">Đối soát:</label>
-            <div class="radio-card" style="height: auto;">
-              <div class="radio-card-content">
-                <div class="radio-card-title">🔎 Bật mặc định</div>
-                <div class="radio-card-desc">Sau lượt 1, gọi lượt 2 để tự giải độc lập. Chỉ câu nào lệch đáp án mới gọi lượt 3 để phân xử.</div>
-              </div>
+
+          <div class="form-group">
+            <label for="inputProfileKey" class="form-label">
+              <span>Gemini API Key:</span>
+              <span class="form-help-link"><a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">Lấy API Key ↗</a></span>
+            </label>
+            <div class="input-with-action">
+              <input type="password" id="inputProfileKey" class="form-input" placeholder="AIzaSy...">
+              <button type="button" id="btnToggleKeyVisibility" class="btn-input-action" title="Hiện/Ẩn Key">👁</button>
+            </div>
+            <p class="form-hint">Key chỉ lưu trong trình duyệt của bạn (BYOK) và dùng trực tiếp để gọi Google API.</p>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group col-6">
+              <label for="inputProfileModel" class="form-label">Model Gemini:</label>
+              <select id="inputProfileModel" class="form-select">
+                <option value="gemini-3.8-flash" selected>Gemini 3.8 Flash (Khuyên dùng)</option>
+                <option value="gemini-3.7-flash">Gemini 3.7 Flash</option>
+                <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
+                <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
+                <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+                <option value="custom">Tự nhập model khác...</option>
+              </select>
+              <input type="text" id="inputCustomModel" class="form-input hidden" style="margin-top: 6px;" placeholder="Tên model (vd: gemini-3.8-flash)">
+            </div>
+            <div class="form-group col-6">
+              <label for="inputProfileThinking" class="form-label">Mức suy luận (Thinking):</label>
+              <select id="inputProfileThinking" class="form-select">
+                <option value="low">Low — Nhanh hơn</option>
+                <option value="medium">Medium — Cân bằng</option>
+                <option value="high" selected>High — Ưu tiên chính xác</option>
+              </select>
             </div>
           </div>
-        </div>
 
-        <div class="form-group">
-          <label class="form-label">Luồng xử lý hiện tại:</label>
-          <div class="radio-card" style="height: auto;">
-            <div class="radio-card-content">
-              <div class="radio-card-title">📸 Tối đa 15 ảnh → tự nén/tách nếu quá lớn → giải độc lập 2 lượt → chỉ câu lệch mới phân xử lượt 3</div>
-              <div class="radio-card-desc">Hệ thống cố gửi tối đa 15 ảnh/request. Nếu payload quá lớn, tự tách batch. Kết quả cuối luôn hiển thị “Câu 1: ...” rồi dòng dưới “A. ...”. Nội bộ dùng JSON có schema để tránh lỗi tách câu.</div>
+          <div class="form-actions-row">
+            <button type="button" id="btnTestThisKey" class="btn-action-sm">
+              🔍 Kiểm tra API &amp; Lấy Models
+            </button>
+            <div class="form-actions-right">
+              <button type="button" id="btnCancelProfile" class="btn-action-sm">Hủy</button>
+              <button type="button" id="btnSaveProfileItem" class="btn-action-sm gemini-btn-primary" style="padding: 4px 14px;">Lưu Profile</button>
             </div>
           </div>
+          <div id="testKeyFeedback" class="test-feedback hidden"></div>
         </div>
 
-        <select id="promptPresetSelect" class="hidden">
-          <option value="multiple_choice_only" selected></option>
-        </select>
+        <!-- Processing Flow Principles -->
+        <div class="info-card-box">
+          <div class="info-card-title">🛡 Cơ Chế Xử Lý FastExam AI v2.0</div>
+          <ul class="info-card-list">
+            <li><b>⚡ Chỉ tra:</b> Gọi duy nhất 1 lượt qua API Profile được chọn. Nhanh và tiết kiệm request.</li>
+            <li><b>🔎 Kiểm tra chéo:</b> Lượt 1 và Lượt 2 giải <i>hoàn toàn độc lập từ ảnh gốc</i>. Tuyệt đối không đưa đáp án Lượt 1 cho Lượt 2.</li>
+            <li><b>✓ Thống nhất:</b> Khi 2 lượt khớp đáp án ➔ chốt ngay không cần request thứ 3.</li>
+            <li><b>⚠ Bất đồng:</b> Nếu có API 3 ➔ gửi ảnh &amp; 2 đáp án để phân xử. Nếu không có API 3 ➔ cho phép bấm <i>[Kiểm tra lại câu này]</i> riêng biệt.</li>
+            <li><b>📸 Tối đa 15 ảnh:</b> Tự nén thích ứng và tự chia batch nếu tổng payload vượt ngưỡng an toàn.</li>
+          </ul>
+        </div>
       </div>
 
       <div class="modal-footer">
-        <button id="btnSaveSettings" class="btn btn-primary gemini-btn-primary">Lưu Cấu Hình</button>
+        <button id="btnCloseSettingsModal" class="btn btn-primary gemini-btn-primary">Đóng</button>
       </div>
     </div>
   </div>
