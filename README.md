@@ -13,8 +13,9 @@ Web mobile-first hỗ trợ phân tích & giải đề thi trắc nghiệm từ 
 
 ## Chạy Local (tùy chọn)
 ```bash
-npm run dev
-# hoặc: node dev-server.js
+node dev-server.js
+# hoặc: python -m http.server 3000
+# hoặc: npx serve .
 ```
 Mở trình duyệt: `http://localhost:3000`
 
