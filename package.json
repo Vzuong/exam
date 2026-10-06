@@ -1,12 +1,9 @@
 {
   "name": "lms-exam-solver",
-  "version": "1.4.0",
+  "version": "2.0.0",
   "description": "Mobile-first Gemini multi-image solver with structured output, independent verification and adaptive request sizing",
-  "main": "server.js",
   "scripts": {
-    "build": "echo 'Static build ready'",
-    "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node dev-server.js"
   },
   "keywords": ["gemini", "exam-solver", "multi-image", "mobile", "ai"],
   "author": "",

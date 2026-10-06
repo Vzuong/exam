@@ -1,21 +1,20 @@
-# FastExam AI v1.4
+# FastExam AI v2.0
 
-Web mobile-first cho việc phân tích câu hỏi trắc nghiệm từ ảnh bằng Gemini API theo mô hình BYOK: mỗi người tự nhập API key và tự chọn model.
+Web mobile-first hỗ trợ phân tích & giải đề thi trắc nghiệm từ ảnh bằng Google Gemini API theo mô hình BYOK (Bring Your Own Key: người dùng tự cấu hình API Profile & Model trong trình duyệt).
 
-## Luồng xử lý
-- Tối đa 15 ảnh/request.
-- Tự ước lượng payload và adaptive compression; nếu 15 ảnh quá lớn sẽ tự tách batch thay vì bắt người dùng chia thủ công.
-- Lượt 1: giải bằng model đã chọn + structured JSON.
-- Lượt 2: giải độc lập từ ảnh, không xem đáp án lượt 1.
-- Nếu hai lượt khác đáp án: chỉ các câu lệch mới gọi lượt 3 để phân xử.
-- Nếu phân xử thất bại, hệ thống không tự đoán mà đánh dấu cần xem lại.
-- Với Gemini 3.8 Flash, hỗ trợ thinking level Low/Medium/High và mặc định High.
-- Không tự retry 429; chỉ retry giới hạn cho lỗi mạng/5xx.
+## Tính năng chính
+- **Quản lý đa API Profile**: Thêm nhiều API Key từ các project / tài khoản Google khác nhau.
+- **2 Chế độ linh hoạt**:
+  - **CHỈ TRA**: Gọi 1 model/profile nhanh gọn.
+  - **KIỂM TRA CHÉO**: Gọi song song 2 profile/model khác nhau, đối soát độc lập và tự động phân xử nếu lệch kết quả.
+- **Tối đa 15 ảnh/lần**: Tự động ước lượng payload và chia batch thông minh nếu vượt ngưỡng an toàn.
+- **Định dạng chuẩn SEB**: Hiển thị rõ ràng số câu, nội dung câu hỏi và chữ cái đáp án đúng.
+- **Tương thích Vercel & Static Hosting**: Triển khai trực tiếp không cần server backend.
 
-## Chạy
+## Chạy Local (tùy chọn)
 ```bash
-npm start
+npm run dev
+# hoặc: node dev-server.js
 ```
-Mở `http://localhost:3000`.
+Mở trình duyệt: `http://localhost:3000`
 
-> API key được nhập và lưu trong trình duyệt theo thiết kế BYOK của ứng dụng.
