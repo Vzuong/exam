@@ -1,8 +1,9 @@
 /**
  * FastExam AI v2.0 - Mobile-First SEB Exam Solver
  * - Multi-API Profile Management (BYOK per account/project)
- * - 2 Modes: [ Chỉ Tra ] & [ Kiểm Tra Chéo ]
- * - Lượt 1 & Lượt 2 giải hoàn toàn độc lập từ ảnh gốc (Pass 2 independent)
+ * - 2 Modes: [ Chỉ Tra ] (Siêu tốc 1 lượt) & [ Kiểm Tra Chéo ] (Song song 2 lượt độc lập)
+ * - Tối ưu tốc độ: Chạy SONG SONG Lượt 1 và Lượt 2 bằng Promise.allSettled (Nhanh gấp đôi)
+ * - Chuyên môn cao: Prompt chuẩn xác, Schema ép enum A-H bắt buộc giải chi tiết
  * - Phân xử Lượt 3 cho câu lệch (Arbitration) hoặc Kiểm tra lại từng câu
  * - Tự động nén thích ứng & chia batch cho tối đa 15 ảnh
  * - Định dạng chuẩn SEB:
@@ -182,8 +183,8 @@ function createDefaultProfiles() {
       name: 'Tài khoản chính',
       apiKey: '',
       model: 'gemini-3.8-flash',
-      thinkingLevel: 'high',
-      status: 'untested', // 'ready' | 'rate_limited' | 'error' | 'untested'
+      thinkingLevel: 'medium',
+      status: 'untested',
       lastChecked: null,
       lastError: null,
       availableModels: []
@@ -193,7 +194,7 @@ function createDefaultProfiles() {
       name: 'Tài khoản phụ 1',
       apiKey: '',
       model: 'gemini-3.8-flash',
-      thinkingLevel: 'high',
+      thinkingLevel: 'medium',
       status: 'untested',
       lastChecked: null,
       lastError: null,
@@ -204,7 +205,6 @@ function createDefaultProfiles() {
 
 function loadProfilesAndSettings() {
   try {
-    // 1. Load Profiles
     const savedProfiles = localStorage.getItem('fastexam_profiles');
     if (savedProfiles) {
       try {
@@ -214,27 +214,24 @@ function loadProfilesAndSettings() {
       }
     }
 
-    // Migrate from legacy single-key storage if needed
     if (!state.profiles || state.profiles.length === 0) {
       const legacyKey = (localStorage.getItem('fastexam_api_key') || '').trim();
       const legacyModel = (localStorage.getItem('fastexam_model') || 'gemini-3.8-flash').trim();
-      const legacyThinking = localStorage.getItem('fastexam_thinking_level') || 'high';
+      const legacyThinking = localStorage.getItem('fastexam_thinking_level') || 'medium';
 
       const defaults = createDefaultProfiles();
       if (legacyKey) {
         defaults[0].apiKey = legacyKey;
         defaults[0].model = legacyModel;
-        defaults[0].thinkingLevel = ['low', 'medium', 'high'].includes(legacyThinking) ? legacyThinking : 'high';
+        defaults[0].thinkingLevel = ['low', 'medium', 'high'].includes(legacyThinking) ? legacyThinking : 'medium';
       }
       state.profiles = defaults;
       saveProfiles();
     }
 
-    // 2. Load Selected Mode
     const savedMode = localStorage.getItem('fastexam_mode');
     state.mode = (savedMode === 'lookup' || savedMode === 'cross_check') ? savedMode : 'cross_check';
 
-    // 3. Load Profile Assignments
     const savedLookup = localStorage.getItem('fastexam_lookup_profile');
     const savedSolver = localStorage.getItem('fastexam_solver_profile');
     const savedVerifier = localStorage.getItem('fastexam_verifier_profile');
@@ -294,7 +291,7 @@ function updateHeaderBadges() {
   const activeProfilesCount = state.profiles.filter(p => Boolean(p.apiKey && p.apiKey.trim())).length;
   if (elements.apiKeyStatusBadge) {
     elements.apiKeyStatusBadge.textContent = `${activeProfilesCount}`;
-    elements.apiKeyStatusBadge.title = `${activeProfilesCount} API Profile đã nhập key`;
+    elements.apiKeyStatusBadge.title = `${activeProfilesCount} API Profile đã có key`;
   }
 
   if (elements.activeModelBadge) {
@@ -331,7 +328,6 @@ function renderProfilePickers() {
     return `<option value="${p.id}">${statusDot} ${escapeHtml(p.name)} (${p.model.replace(/^gemini-/, '')} • ${keyHint})</option>`;
   }).join('');
 
-  // 1. Lookup Picker
   if (elements.selectLookupProfile) {
     elements.selectLookupProfile.innerHTML = optionsHtml || '<option value="">(Chưa có profile)</option>';
     if (state.lookupProfileId) elements.selectLookupProfile.value = state.lookupProfileId;
@@ -341,19 +337,16 @@ function renderProfilePickers() {
     }
   }
 
-  // 2. Cross Solver (Pass 1)
   if (elements.selectCrossSolver) {
     elements.selectCrossSolver.innerHTML = optionsHtml || '<option value="">(Chưa có profile)</option>';
     if (state.solverProfileId) elements.selectCrossSolver.value = state.solverProfileId;
   }
 
-  // 3. Cross Verifier (Pass 2)
   if (elements.selectCrossVerifier) {
     elements.selectCrossVerifier.innerHTML = optionsHtml || '<option value="">(Chưa có profile)</option>';
     if (state.verifierProfileId) elements.selectCrossVerifier.value = state.verifierProfileId;
   }
 
-  // 4. Cross Arbitrator (Pass 3)
   if (elements.selectCrossArbitrator) {
     const arbitratorOptions = '<option value="">-- Không dùng (Báo lệch & cho bấm kiểm tra lại) --</option>' + optionsHtml;
     elements.selectCrossArbitrator.innerHTML = arbitratorOptions;
@@ -370,7 +363,7 @@ function renderProfilesList() {
     return;
   }
 
-  container.innerHTML = state.profiles.map((p, index) => {
+  container.innerHTML = state.profiles.map((p) => {
     const statusMap = {
       ready: { label: '● Khả dụng (200 OK)', cls: 'status-ready' },
       rate_limited: { label: '● Chạm hạn mức (429)', cls: 'status-rate_limited' },
@@ -415,7 +408,6 @@ function renderProfilesList() {
     `;
   }).join('');
 
-  // Attach card action listeners
   container.querySelectorAll('.btn-test-profile').forEach(btn => {
     btn.addEventListener('click', () => runProfileTest(btn.dataset.id));
   });
@@ -435,7 +427,7 @@ function openAddProfileForm() {
   elements.inputProfileModel.value = 'gemini-3.8-flash';
   elements.inputCustomModel.value = '';
   elements.inputCustomModel.classList.add('hidden');
-  elements.inputProfileThinking.value = 'high';
+  elements.inputProfileThinking.value = 'medium';
   elements.testKeyFeedback.className = 'test-feedback hidden';
   elements.testKeyFeedback.textContent = '';
   elements.profileFormBox.classList.remove('hidden');
@@ -461,7 +453,7 @@ function openEditProfileForm(profileId) {
     elements.inputCustomModel.classList.remove('hidden');
   }
 
-  elements.inputProfileThinking.value = p.thinkingLevel || 'high';
+  elements.inputProfileThinking.value = p.thinkingLevel || 'medium';
   elements.testKeyFeedback.className = 'test-feedback hidden';
   elements.testKeyFeedback.textContent = '';
   elements.profileFormBox.classList.remove('hidden');
@@ -477,11 +469,10 @@ function saveProfileFormData() {
   const selectedModel = elements.inputProfileModel.value === 'custom'
     ? (elements.inputCustomModel.value || '').trim() || 'gemini-3.8-flash'
     : elements.inputProfileModel.value;
-  const thinking = elements.inputProfileThinking.value || 'high';
+  const thinking = elements.inputProfileThinking.value || 'medium';
   const editId = elements.editProfileId.value;
 
   if (editId) {
-    // Update existing
     const p = getProfileById(editId);
     if (p) {
       p.name = name;
@@ -492,7 +483,6 @@ function saveProfileFormData() {
       p.lastError = null;
     }
   } else {
-    // Create new
     const newProfile = {
       id: 'prof_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
       name,
@@ -539,9 +529,8 @@ async function testApiKeyCall(apiKey) {
     throw new Error('Vui lòng nhập API key trước khi kiểm tra.');
   }
 
-  // Fetch available models from Google Generative Language API
   const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`;
-  const resp = await fetch(url).catch(err => {
+  const resp = await fetch(url).catch(() => {
     throw new Error('Không thể kết nối tới Google Generative Language API. Kiểm tra mạng.');
   });
 
@@ -609,7 +598,6 @@ async function testFormKey() {
     feedback.className = 'test-feedback success';
     feedback.textContent = `✓ API Key hợp lệ! Tìm thấy ${models.length} models khả dụng từ Google.`;
 
-    // Populate model dropdown with detected models if available
     if (models.length > 0) {
       const currentSelected = elements.inputProfileModel.value;
       const combined = Array.from(new Set([...DEFAULT_MODELS.map(m => m.id), ...models]));
@@ -642,13 +630,13 @@ function updateResultBanner() {
   elements.resultStatusBanner.classList.remove('hidden');
 
   if (state.mode === 'lookup') {
-    elements.bannerModeText.textContent = 'Chế độ: ✓ Chỉ tra (1 Lượt)';
+    elements.bannerModeText.textContent = 'Chế độ: ✓ Chỉ tra (Siêu tốc 1 lượt)';
     const p = getProfileById(state.lookupProfileId);
     elements.bannerProfilesRow.innerHTML = `
       <span class="banner-profile-chip">API Giải: <b>${escapeHtml(p?.name || 'Chưa chọn')}</b> (${p?.model || '3.8 Flash'})</span>
     `;
   } else {
-    elements.bannerModeText.textContent = 'Chế độ: ✓ Kiểm tra chéo (2 Lượt Độc Lập)';
+    elements.bannerModeText.textContent = 'Chế độ: ✓ Kiểm tra chéo (Song song 2 lượt độc lập)';
     const p1 = getProfileById(state.solverProfileId);
     const p2 = getProfileById(state.verifierProfileId);
     const p3 = getProfileById(state.arbitratorProfileId);
@@ -660,7 +648,7 @@ function updateResultBanner() {
     if (p3) {
       html += `<span class="banner-profile-chip">3. Phân xử: <b>${escapeHtml(p3.name)}</b> (${p3.model})</span>`;
     } else {
-      html += `<span class="banner-profile-chip" style="opacity: 0.7;">3. Phân xử: Không cấu hình (Kiểm tra lại câu lẻ)</span>`;
+      html += `<span class="banner-profile-chip" style="opacity: 0.7;">3. Phân xử: Tự kiểm tra câu lệch</span>`;
     }
     elements.bannerProfilesRow.innerHTML = html;
   }
@@ -700,7 +688,7 @@ function resetRequestStats() {
   updateRequestStatsDisplay();
 }
 
-function registerRequest(kind, profileName = '') {
+function registerRequest(kind) {
   state.requestStats.run += 1;
   if (kind === 'lookup') state.requestStats.lookupPass += 1;
   if (kind === 'first') state.requestStats.firstPass += 1;
@@ -711,137 +699,91 @@ function registerRequest(kind, profileName = '') {
 }
 
 // ==========================================
-// 6. Prompts & Structured JSON Engine
+// 6. Prompts & Structured JSON Schema (Độ chính xác cao)
 // ==========================================
 function supportsThinkingLevel(model) {
-  return /gemini-(?:3\.[1-8]|2\.5)/i.test(model || '') && /flash/i.test(model || '');
+  return /^gemini-3(?:\.1|\.5|\.6|\.7|\.8)?-.+/i.test(model || '') && /flash/i.test(model || '');
 }
 
-function getStructuredSchema(count) {
-  return {
-    type: 'object',
-    properties: {
-      questions: {
-        type: 'array',
-        description: 'Danh sách câu hỏi trắc nghiệm tương ứng từng ảnh.',
-        items: {
-          type: 'object',
-          properties: {
-            number: { type: 'integer', description: 'Số thứ tự ảnh từ 1 trở đi' },
-            question: { type: 'string', description: 'Nội dung câu hỏi, không thêm nhãn Câu N:' },
-            answer_letter: { type: 'string', description: 'Chữ cái phương án đúng: A, B, C, D...' },
-            answer_text: { type: 'string', description: 'Nội dung đầy đủ của phương án đúng' },
-            uncertain: { type: 'boolean', description: 'True nếu ảnh quá mờ hoặc không đọc rõ' }
-          },
-          required: ['number', 'question', 'answer_letter', 'answer_text']
-        }
+const RESPONSE_SCHEMA_TEMPLATE = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    questions: {
+      type: 'array',
+      description: 'Danh sách câu hỏi theo đúng thứ tự các ảnh được gửi.',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          number: { type: 'integer', description: 'Số thứ tự câu hỏi' },
+          question: { type: 'string', description: 'Toàn bộ nội dung câu hỏi, không thêm nhãn Câu N:.' },
+          answer_letter: { type: 'string', enum: ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'], description: 'Chữ cái của phương án đúng duy nhất.' },
+          answer_text: { type: 'string', description: 'Toàn bộ nội dung của phương án đúng.' }
+        },
+        required: ['question', 'answer_letter', 'answer_text']
       }
-    },
-    required: ['questions']
-  };
-}
-
-function getLookupPrompt() {
-  return `Bạn là chuyên gia giải đề thi trắc nghiệm từ hình ảnh với độ chính xác cao nhất.
-Đọc kỹ từng ảnh theo đúng thứ tự ảnh được gửi. Tự phân tích câu hỏi và tất cả phương án A, B, C, D (hoặc A-H).
-Tự giải bằng kiến thức chuẩn xác trước khi chốt đáp án.
-
-BẮT BUỘC TRẢ VỀ JSON HỢP LỆ THEO SCHEMA:
-{
-  "questions": [
-    {
-      "number": 1,
-      "question": "Toàn bộ nội dung câu hỏi, không thêm nhãn Câu 1:",
-      "answer_letter": "B",
-      "answer_text": "Nội dung đầy đủ của phương án B",
-      "uncertain": false
     }
-  ]
-}
-Số lượng phần tử questions phải đúng bằng số ảnh gửi. Không trả markdown hay giải thích ngoài JSON.`;
+  },
+  required: ['questions']
+};
+
+function getSystemPrompt() {
+  return `Bạn là chuyên gia giải trắc nghiệm dựa trên hình ảnh, ưu tiên độ chính xác tuyệt đối.
+
+Có nhiều hình ảnh, mỗi hình ảnh tương ứng với một câu hỏi. Hãy đọc kỹ toàn bộ câu hỏi và tất cả phương án A, B, C, D (hoặc A-H) trong từng ảnh.
+Tự giải bằng kiến thức chuyên môn chuẩn xác trước khi kết luận. Không suy diễn khi ảnh không đủ rõ.
+
+BẮT BUỘC trả JSON theo schema được cung cấp. Số phần tử questions phải đúng bằng số ảnh được gửi.
+Mỗi phần tử tương ứng đúng theo THỨ TỰ ẢNH:
+- question: chép lại toàn bộ nội dung câu hỏi, không thêm nhãn “Câu 1:” ở đầu.
+- answer_letter: chỉ một chữ cái duy nhất (A, B, C, D...) là phương án đúng.
+- answer_text: chép đầy đủ nội dung của phương án đúng, không chỉ chữ cái.
+
+Hãy tự kiểm tra lại từng câu trước khi trả JSON. Không trả markdown, không trả lời ngoài JSON.`;
 }
 
-function getSolverPrompt() {
-  return `Bạn là chuyên gia giải đề trắc nghiệm độc lập (LƯỢT 1).
-Xem từng ảnh câu hỏi, phân tích kỹ nội dung đề và tất cả phương án A, B, C, D (hoặc A-H).
-Tự giải bằng kiến thức chuyên môn và đưa ra đáp án đúng nhất.
-
-BẮT BUỘC trả JSON theo schema:
-{
-  "questions": [
-    {
-      "number": 1,
-      "question": "Nội dung câu hỏi",
-      "answer_letter": "B",
-      "answer_text": "Nội dung phương án",
-      "uncertain": false
-    }
-  ]
-}
-Chỉ trả JSON, không thêm văn bản ngoài JSON.`;
-}
-
-function getIndependentVerifierPrompt(count) {
-  // CRITICAL REQUIREMENT (PHẦN 7):
-  // Lượt 2 phải giải hoàn toàn độc lập từ ảnh, KHÔNG nhìn đáp án lượt 1.
+function getIndependentCheckPrompt(count) {
   return `Bạn là người kiểm tra ĐỘC LẬP cho ${count} câu trắc nghiệm từ hình ảnh (LƯỢT 2).
-Hãy đọc kỹ toàn bộ hình ảnh và TỰ GIẢI LẠI TỪ ĐẦU từ nội dung ảnh. Tuyệt đối không có đáp án lượt trước để tham khảo.
+
+Hãy đọc toàn bộ ảnh và TỰ GIẢI LẠI từ đầu. Không có đáp án lượt trước để tham khảo và tuyệt đối không được dựa vào suy đoán.
 Đối với từng ảnh, xác định chính xác câu hỏi, các phương án và phương án đúng.
 
-BẮT BUỘC trả về JSON theo schema:
-{
-  "questions": [
-    {
-      "number": 1,
-      "question": "Nội dung câu hỏi",
-      "answer_letter": "B",
-      "answer_text": "Nội dung phương án",
-      "uncertain": false
-    }
-  ]
-}
-Số lượng đúng ${count} câu theo thứ tự ảnh. Không trả markdown hay chữ thừa.`;
+BẮT BUỘC trả JSON theo schema được cung cấp, đúng ${count} phần tử và đúng thứ tự ảnh:
+- question: toàn bộ nội dung câu hỏi, không thêm “Câu N:” ở đầu.
+- answer_letter: một chữ cái phương án đúng (A, B, C, D...).
+- answer_text: toàn bộ nội dung phương án đúng.
+
+Không trả markdown hay lời giải thích ngoài JSON.`;
 }
 
 function getArbitrationPrompt(conflicts) {
-  const list = conflicts.map((c, i) => {
-    return `--- CÂU LỆCH ${i + 1} (Ảnh số ${i + 1}) ---
+  const candidates = conflicts.map((c, i) => {
+    return `Câu ${i + 1}:
 Lượt 1: ${c.first.answer_letter}. ${c.first.answer_text}
 Lượt 2: ${c.second.answer_letter}. ${c.second.answer_text}
-Nội dung câu hỏi tạm ghi: ${c.first.question || c.second.question || '(xem ảnh)'}`;
+Câu hỏi ghi nhận: ${c.first.question || c.second.question || '(xem ảnh)'}`;
   }).join('\n\n');
 
-  return `Bạn là người PHÂN XỬ CUỐI CÙNG cho các câu trắc nghiệm mà hai lượt giải độc lập có đáp án KHÁC NHAU.
-Xem lại trực tiếp hình ảnh gốc của từng câu bên dưới, đọc kỹ đề bài và tất cả các phương án.
+  return `Bạn là người PHÂN XỬ cuối cùng cho các câu trắc nghiệm mà hai lượt giải độc lập không thống nhất.
 
-DANH SÁCH HAI LƯỢT TRƯỚC ĐƯA RA:
-${list}
+Hãy xem lại trực tiếp hình ảnh của từng câu bên dưới, đọc lại toàn bộ đề và các phương án, sau đó tự suy luận bằng kiến thức chuyên môn.
+Không được chọn theo đa số một cách máy móc. Phải dựa vào nội dung trong ảnh và kiến thức đúng.
 
-QUY TẮC PHÂN XỬ:
-1. Không được mặc định chọn Lượt 1. Không được mặc định chọn Lượt 2.
-2. Ưu tiên tuyệt đối vào nội dung hình ảnh gốc và kiến thức chuẩn xác nhất.
-3. Nếu cả 2 lượt đều sai, bạn tự chọn phương án đúng thực sự từ ảnh.
-4. Nếu vẫn không thể kết luận chắc chắn vì ảnh mờ hoặc đề tranh cãi: đặt "uncertain": true, "answer_letter": "?", "answer_text": "Không xác định chắc chắn".
+${candidates}
 
-BẮT BUỘC trả JSON:
-{
-  "questions": [
-    {
-      "number": 1,
-      "question": "Nội dung câu hỏi",
-      "answer_letter": "B",
-      "answer_text": "Nội dung phương án chốt",
-      "uncertain": false
-    }
-  ]
-}
-Đúng ${conflicts.length} phần tử theo thứ tự ảnh. Không thêm lời giải thích ngoài JSON.`;
+BẮT BUỘC trả JSON theo schema được cung cấp, đúng ${conflicts.length} phần tử và đúng thứ tự ảnh được gửi:
+- question: toàn bộ câu hỏi.
+- answer_letter: chữ cái đáp án cuối cùng (A, B, C, D...).
+- answer_text: toàn bộ nội dung đáp án cuối cùng.
+
+Không trả markdown hay giải thích ngoài JSON.`;
 }
 
 function buildParts(images, prompt) {
   const parts = [{ text: `${prompt}\n\n` }];
   images.forEach((q, idx) => {
-    parts.push({ text: `=== ẢNH CÂU HỎI ${idx + 1} / ${images.length} (Tên: ${q.name || `cau_${idx + 1}.jpg`}) ===\n` });
+    parts.push({ text: `=== ẢNH ${idx + 1} / ${images.length} ===\nTên file: ${q.name || `cau-${idx + 1}.jpg`}\n` });
     parts.push({
       inline_data: {
         mime_type: q.mimeType || 'image/jpeg',
@@ -853,38 +795,58 @@ function buildParts(images, prompt) {
 }
 
 // ==========================================
-// 7. Robust Gemini API Transport
+// 7. Robust Gemini API Transport (High Speed & Smart Output)
 // ==========================================
+function getGenerationConfig(imageCount, profile) {
+  const schema = {
+    ...RESPONSE_SCHEMA_TEMPLATE,
+    properties: {
+      questions: {
+        ...RESPONSE_SCHEMA_TEMPLATE.properties.questions,
+        minItems: imageCount,
+        maxItems: imageCount
+      }
+    }
+  };
+
+  const config = {
+    responseFormat: {
+      text: {
+        mimeType: 'application/json',
+        schema
+      }
+    },
+    // Tokens vừa đủ để không bị delay streaming
+    maxOutputTokens: Math.min(14000, Math.max(2500, 650 + imageCount * 800))
+  };
+
+  const model = profile?.model || 'gemini-3.8-flash';
+  if (supportsThinkingLevel(model)) {
+    // Tôn trọng thiết lập Thinking Level của profile để tăng tốc
+    const thinkingLevel = (state.mode === 'cross_check' && (!profile.thinkingLevel || profile.thinkingLevel === 'high'))
+      ? 'high'
+      : (profile.thinkingLevel || 'medium');
+    config.thinkingConfig = { thinkingLevel };
+  }
+
+  return config;
+}
+
 async function callGeminiApiForProfile(profile, images, prompt, kind, retryCount = 0) {
   if (!profile || !profile.apiKey) {
-    const pName = profile?.name || 'Tài khoản đã chọn';
-    throw new Error(`Profile "${pName}" chưa có API key. Vui lòng bấm biểu tượng Cài đặt để nhập key.`);
+    const pName = profile?.name || 'Tài khoản';
+    throw new Error(`Profile "${pName}" chưa có API key. Vui lòng vào Cài đặt để nhập key.`);
   }
 
   const model = profile.model || 'gemini-3.8-flash';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
 
-  const generationConfig = {
-    responseMimeType: 'application/json',
-    responseSchema: getStructuredSchema(images.length),
-    maxOutputTokens: Math.min(14000, Math.max(3000, 700 + images.length * 850))
-  };
-
-  // Thinking Level logic (Section 2: Default High when Cross-Check)
-  if (supportsThinkingLevel(model)) {
-    let level = profile.thinkingLevel || 'high';
-    if (state.mode === 'cross_check' && level === 'low') {
-      level = 'high';
-    }
-    generationConfig.thinkingConfig = { thinkingLevel: level };
-  }
-
   const payload = {
     contents: [{ role: 'user', parts: buildParts(images, prompt) }],
-    generationConfig
+    generationConfig: getGenerationConfig(images.length, profile)
   };
 
-  registerRequest(kind, profile.name);
+  registerRequest(kind);
 
   try {
     const response = await fetch(url, {
@@ -901,7 +863,6 @@ async function callGeminiApiForProfile(profile, images, prompt, kind, retryCount
     if (!response.ok) {
       const apiMsg = data.error?.message || response.statusText || 'Lỗi không xác định';
 
-      // 429 = Rate limit/Quota: KHÔNG retry liên tục (Section 1 & 12)
       if (response.status === 429) {
         profile.status = 'rate_limited';
         profile.lastError = 'API này đang chạm giới hạn sử dụng.';
@@ -909,7 +870,6 @@ async function callGeminiApiForProfile(profile, images, prompt, kind, retryCount
         throw new Error(`API "${profile.name}" đang chạm giới hạn sử dụng (429).`);
       }
 
-      // 401 / 403 = Invalid key or no access
       if (response.status === 401 || response.status === 403) {
         profile.status = 'error';
         profile.lastError = 'API key này không hoạt động hoặc không có quyền truy cập model đã chọn.';
@@ -917,23 +877,20 @@ async function callGeminiApiForProfile(profile, images, prompt, kind, retryCount
         throw new Error(`API key của "${profile.name}" không hoạt động hoặc không có quyền truy cập model đã chọn (${response.status}).`);
       }
 
-      // 413 = Payload Too Large: Ném cờ để chia batch nhỏ hơn
       if (response.status === 413) {
         throw new Error('PAYLOAD_413_TOO_LARGE');
       }
 
-      // 400 = Invalid request
       if (response.status === 400) {
         profile.status = 'error';
         saveProfiles();
         throw new Error(`Yêu cầu không hợp lệ cho "${profile.name}" (400): ${apiMsg}`);
       }
 
-      // 500, 502, 503, 504 = Lỗi dịch vụ tạm thời: Retry tối đa 1-2 lần có backoff
       if ([500, 502, 503, 504].includes(response.status) && retryCount < 2) {
         state.requestStats.retries += 1;
         updateRequestStatsDisplay();
-        const waitMs = 1200 * Math.pow(2, retryCount) + Math.floor(Math.random() * 400);
+        const waitMs = 1200 * Math.pow(2, retryCount) + Math.floor(Math.random() * 300);
         await delay(waitMs);
         return callGeminiApiForProfile(profile, images, prompt, kind, retryCount + 1);
       }
@@ -968,74 +925,101 @@ async function callGeminiApiForProfile(profile, images, prompt, kind, retryCount
 }
 
 // ==========================================
-// 8. Output Normalization & Format Enforcer
+// 8. Output Normalization & Strict SEB Format
 // ==========================================
-// Section 9: JSON Nội bộ & Định dạng hiển thị chuẩn:
-// Câu 1: [nội dung câu hỏi]
-// B. [nội dung đáp án đúng]
+function normalizeStructuredItems(raw, count) {
+  let parsed;
+  try {
+    const cleaned = String(raw || '').replace(/^```json\s*/i, '').replace(/\s*```$/i, '').trim();
+    parsed = JSON.parse(cleaned);
+  } catch (_) {
+    return parseBatchResponse(raw, count);
+  }
+
+  const items = Array.isArray(parsed) ? parsed : parsed?.questions;
+  if (!Array.isArray(items)) return parseBatchResponse(raw, count);
+
+  return Array.from({ length: count }, (_, i) => {
+    const item = items[i] || {};
+    const letter = String(item.answer_letter || '').trim().toUpperCase();
+    const validLetter = /^[A-H]$/.test(letter) ? letter : '?';
+    const rawQ = String(item.question || '').replace(/^Câu\s*(?:hỏi\s*)?\d+\s*:\s*/i, '').trim();
+    const rawA = String(item.answer_text || '').replace(/^[A-H]\s*[\.):]\s*/i, '').trim();
+
+    return {
+      number: i + 1,
+      questionText: rawQ || 'Không đọc được câu hỏi',
+      answerLetter: validLetter,
+      answerText: rawA || 'Chưa xác định được đáp án',
+      letter: validLetter
+    };
+  });
+}
+
+function parseBatchResponse(rawText, count) {
+  const text = String(rawText || '').replace(/```[a-z]*|```/gi, '').trim();
+  const matches = [...text.matchAll(/(?=Câu\s*(?:hỏi\s*)?\d+\s*:)/gi)];
+  const chunks = [];
+
+  if (matches.length >= count) {
+    for (let i = 0; i < count; i++) {
+      const start = matches[i].index;
+      const end = i + 1 < matches.length ? matches[i + 1].index : text.length;
+      chunks.push(text.slice(start, end).trim());
+    }
+  } else {
+    const sections = text.split(/(?:^|\n)\s*===?\s*ẢNH\s*\d+[^\n]*\n?/i).map(s => s.trim()).filter(Boolean);
+    if (sections.length >= count) {
+      chunks.push(...sections.slice(0, count));
+    } else {
+      const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+      let current = [];
+      for (const line of lines) {
+        if (/^Câu\s*(?:hỏi\s*)?\d+\s*:/i.test(line) && current.length) {
+          chunks.push(current.join('\n'));
+          current = [line];
+        } else {
+          current.push(line);
+        }
+      }
+      if (current.length) chunks.push(current.join('\n'));
+    }
+  }
+
+  return Array.from({ length: count }, (_, i) => {
+    const chunk = chunks[i] || '';
+    const match = chunk.match(/\b([A-H])\s*[\.):]/i);
+    const letter = match ? match[1].toUpperCase() : '?';
+    const qMatch = chunk.match(/^Câu\s*(?:hỏi\s*)?\d+\s*:\s*(.*?)(?=\n[A-H]\s*[\.):]|$)/is);
+    const qText = qMatch ? qMatch[1].trim() : chunk.replace(/\b[A-H]\s*[\.):].*/s, '').trim();
+    const aText = chunk.replace(/^.*?\b[A-H]\s*[\.):]\s*/s, '').trim();
+
+    return {
+      number: i + 1,
+      questionText: qText || 'Không đọc được câu hỏi',
+      answerLetter: letter,
+      answerText: aText || 'Chưa xác định được đáp án',
+      letter
+    };
+  });
+}
+
 function cleanQuestionLine(rawQuestion, index) {
   let qText = String(rawQuestion || '').trim();
   qText = qText.replace(/^Câu\s*(?:hỏi\s*)?\d+\s*:\s*/i, '').trim();
-  return `Câu ${index + 1}: ${qText || '(Không đọc được câu hỏi từ ảnh)'}`;
+  return `Câu ${index + 1}: ${qText || '(Không đọc được câu hỏi)'}`;
 }
 
 function cleanAnswerLine(letter, answerText) {
   const l = String(letter || '').trim().toUpperCase();
-  const text = String(answerText || '').trim();
   const validLetter = /^[A-H]$/.test(l) ? l : '?';
+  let text = String(answerText || '').trim();
+  text = text.replace(/^[A-H]\s*[\.):]\s*/i, '').trim();
 
   if (validLetter === '?') {
     return text ? `? ${text}` : 'Chưa xác định được đáp án';
   }
   return text ? `${validLetter}. ${text}` : `${validLetter}.`;
-}
-
-function parseStructuredJson(rawText, expectedCount) {
-  let parsed;
-  try {
-    const cleaned = String(rawText || '').replace(/^```json\s*/i, '').replace(/\s*```$/i, '').trim();
-    parsed = JSON.parse(cleaned);
-  } catch (_) {
-    return fallbackRegexParse(rawText, expectedCount);
-  }
-
-  const items = Array.isArray(parsed) ? parsed : parsed?.questions;
-  if (!Array.isArray(items)) {
-    return fallbackRegexParse(rawText, expectedCount);
-  }
-
-  return Array.from({ length: expectedCount }, (_, i) => {
-    const item = items[i] || {};
-    const letter = String(item.answer_letter || '').trim().toUpperCase();
-    const validLetter = /^[A-H]$/.test(letter) ? letter : '?';
-    const isUncertain = Boolean(item.uncertain) || validLetter === '?';
-
-    return {
-      number: i + 1,
-      questionText: String(item.question || '').trim(),
-      answerLetter: isUncertain ? '?' : validLetter,
-      answerText: String(item.answer_text || '').trim(),
-      uncertain: isUncertain
-    };
-  });
-}
-
-function fallbackRegexParse(rawText, count) {
-  const clean = String(rawText || '').replace(/```[a-z]*|```/gi, '').trim();
-  const lines = clean.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-
-  return Array.from({ length: count }, (_, i) => {
-    const line = lines[i] || '';
-    const match = line.match(/\b([A-H])\s*[\.):]/i);
-    const letter = match ? match[1].toUpperCase() : '?';
-    return {
-      number: i + 1,
-      questionText: line.replace(/\b[A-H]\s*[\.):].*/, '').trim(),
-      answerLetter: letter,
-      answerText: line,
-      uncertain: letter === '?'
-    };
-  });
 }
 
 // ==========================================
@@ -1051,20 +1035,18 @@ async function fitImagesWithinBudget(images) {
   if (estimatePayloadBytes(images) <= targetBytes) return true;
 
   const qualitySteps = [
-    { maxDim: 1650, quality: 0.80 },
-    { maxDim: 1450, quality: 0.72 },
-    { maxDim: 1250, quality: 0.65 },
-    { maxDim: 1050, quality: 0.55 },
-    { maxDim: 900,  quality: 0.48 }
+    { maxDim: 1600, quality: 0.82 },
+    { maxDim: 1400, quality: 0.74 },
+    { maxDim: 1200, quality: 0.65 },
+    { maxDim: 1000, quality: 0.55 },
+    { maxDim: 880,  quality: 0.48 }
   ];
 
   for (const step of qualitySteps) {
     for (const q of images) {
       await recompressImage(q, step.maxDim, step.quality);
     }
-    if (estimatePayloadBytes(images) <= targetBytes) {
-      return true;
-    }
+    if (estimatePayloadBytes(images) <= targetBytes) return true;
   }
   return false;
 }
@@ -1139,12 +1121,11 @@ async function splitImagesIntoBatches(images) {
 }
 
 // ==========================================
-// 10. Main Solver Engine (Lookup & Cross-Check)
+// 10. Main Solver Engine (Parallel Cross-Check)
 // ==========================================
 async function solveAllQuestions() {
   if (state.questions.length === 0) return;
 
-  // Validate Active Mode Profiles
   if (state.mode === 'lookup') {
     const solver = getProfileById(state.lookupProfileId);
     if (!solver || !solver.apiKey) {
@@ -1153,7 +1134,6 @@ async function solveAllQuestions() {
       return;
     }
   } else {
-    // Cross check requires at least 2 profiles with keys
     const p1 = getProfileById(state.solverProfileId);
     const p2 = getProfileById(state.verifierProfileId);
     if (!p1 || !p1.apiKey || !p2 || !p2.apiKey) {
@@ -1193,15 +1173,15 @@ async function solveAllQuestions() {
 
       if (state.mode === 'lookup') {
         // ========================================
-        // CHẾ ĐỘ 1: CHỈ TRA (1 request per batch)
+        // CHẾ ĐỘ 1: CHỈ TRA (Siêu tốc 1 request/batch)
         // ========================================
         const solverProfile = getProfileById(state.lookupProfileId);
-        state.currentProcessStage = `Đang phân tích ảnh ${globalStartIndex + 1}–${globalStartIndex + batch.length}${batchLabel}...`;
+        state.currentProcessStage = `⚡ Đang giải siêu tốc ${batch.length} ảnh (${solverProfile.name})${batchLabel}...`;
         updateResultBanner();
         showToast(state.currentProcessStage, 'info');
 
-        const rawResult = await callGeminiApiForProfile(solverProfile, batch, getLookupPrompt(), 'lookup');
-        const parsed = parseStructuredJson(rawResult, batch.length);
+        const rawResult = await callGeminiApiForProfile(solverProfile, batch, getSystemPrompt(), 'lookup');
+        const parsed = normalizeStructuredItems(rawResult, batch.length);
 
         batch.forEach((q, idx) => {
           const item = parsed[idx] || {};
@@ -1218,58 +1198,58 @@ async function solveAllQuestions() {
 
       } else {
         // ========================================
-        // CHẾ ĐỘ 2: KIỂM TRA CHÉO (Pass 1 + Pass 2 Độc Lập)
+        // CHẾ ĐỘ 2: KIỂM TRA CHÉO SONG SONG (TỐC ĐỘ GẤP 2X)
         // ========================================
         const solverProfile = getProfileById(state.solverProfileId);
         const verifierProfile = getProfileById(state.verifierProfileId);
         const arbitratorProfile = getProfileById(state.arbitratorProfileId);
 
-        // Lượt 1: Giải độc lập với Profile 1
-        state.currentProcessStage = `Đang phân tích Lượt 1 (${solverProfile.name})${batchLabel}...`;
+        state.currentProcessStage = `🚀 Đang chạy song song 2 API: ${solverProfile.name} ✖ ${verifierProfile.name}${batchLabel}...`;
         updateResultBanner();
         showToast(state.currentProcessStage, 'info');
 
-        const rawFirst = await callGeminiApiForProfile(solverProfile, batch, getSolverPrompt(), 'first');
-        const firstPass = parseStructuredJson(rawFirst, batch.length);
+        // BẮT ĐẦU CHẠY CẢ 2 LƯỢT ĐỒNG THỜI BẰNG PROMISE.ALLSETTLED
+        const [res1, res2] = await Promise.allSettled([
+          callGeminiApiForProfile(solverProfile, batch, getSystemPrompt(), 'first'),
+          callGeminiApiForProfile(verifierProfile, batch, getIndependentCheckPrompt(batch.length), 'second')
+        ]);
 
-        // Cập nhật tạm thời để người dùng thấy đáp án Lượt 1 ngay
-        batch.forEach((q, idx) => {
-          const item = firstPass[idx] || {};
-          const qNum = globalStartIndex + idx;
-          q.questionLine = cleanQuestionLine(item.questionText, qNum);
-          q.answerLine = cleanAnswerLine(item.answerLetter, item.answerText);
-          q.letter = item.answerLetter || '?';
-          q.check1 = item.answerLetter || '?';
-          q.status = 'loading';
-        });
-        renderQuestions();
-        renderMatrix();
+        if (res1.status === 'rejected' && res2.status === 'rejected') {
+          throw new Error(`Cả 2 API đều lỗi! Lượt 1: ${res1.reason?.message}; Lượt 2: ${res2.reason?.message}`);
+        }
 
-        // Lượt 2: Giải độc lập từ ảnh gốc với Profile 2 (KHÔNG nhìn đáp án lượt 1!)
-        state.currentProcessStage = `Đang kiểm tra chéo độc lập Lượt 2 (${verifierProfile.name})${batchLabel}...`;
-        updateResultBanner();
-        showToast(state.currentProcessStage, 'info');
+        const firstPass = res1.status === 'fulfilled'
+          ? normalizeStructuredItems(res1.value, batch.length)
+          : null;
 
-        let secondPass;
-        try {
-          const rawSecond = await callGeminiApiForProfile(verifierProfile, batch, getIndependentVerifierPrompt(batch.length), 'second');
-          secondPass = parseStructuredJson(rawSecond, batch.length);
-        } catch (secondErr) {
-          console.error('Lỗi Lượt 2:', secondErr);
-          // Giữ kết quả lượt 1 nếu lượt 2 gặp lỗi (Section 12)
+        const secondPass = res2.status === 'fulfilled'
+          ? normalizeStructuredItems(res2.value, batch.length)
+          : null;
+
+        // Nếu 1 trong 2 lượt lỗi, vẫn giữ kết quả của lượt thành công (Section 12)
+        if (!firstPass || !secondPass) {
+          const validPass = firstPass || secondPass;
+          const failedErr = res1.status === 'rejected' ? res1.reason : res2.reason;
           batch.forEach((q, idx) => {
-            q.status = 'warning';
-            q.check2 = '!';
-            q.answerLine += ` (Lượt 2 lỗi: ${secondErr.message})`;
+            const item = validPass[idx] || {};
+            const qNum = globalStartIndex + idx;
+            q.questionLine = cleanQuestionLine(item.questionText, qNum);
+            q.answerLine = cleanAnswerLine(item.answerLetter, item.answerText);
+            q.letter = item.answerLetter || '?';
+            q.status = q.letter !== '?' ? 'warning' : 'error';
+            q.confidence = 'verification-failed';
+            q.check1 = firstPass ? firstPass[idx]?.answerLetter : '!';
+            q.check2 = secondPass ? secondPass[idx]?.answerLetter : '!';
           });
+          showToast(`⚠ Một API gặp lỗi: ${failedErr.message}`, 'error');
           renderQuestions();
           renderMatrix();
           globalStartIndex += batch.length;
           continue;
         }
 
-        // Đối Soát Lượt 1 vs Lượt 2
-        state.currentProcessStage = `Đang đối chiếu kết quả 2 lượt${batchLabel}...`;
+        // ĐỐI SOÁT LƯỢT 1 VS LƯỢT 2
+        state.currentProcessStage = `🔎 Đang đối chiếu 2 kết quả độc lập${batchLabel}...`;
         updateResultBanner();
 
         const conflicts = [];
@@ -1277,6 +1257,8 @@ async function solveAllQuestions() {
         batch.forEach((q, idx) => {
           const f = firstPass[idx] || {};
           const s = secondPass[idx] || {};
+          const qNum = globalStartIndex + idx;
+
           q.check1 = f.answerLetter || '?';
           q.check2 = s.answerLetter || '?';
 
@@ -1287,14 +1269,14 @@ async function solveAllQuestions() {
             q.letter = q.check1;
             q.status = 'done';
             q.confidence = 'agreed';
-            q.questionLine = cleanQuestionLine(s.questionText || f.questionText, globalStartIndex + idx);
+            q.questionLine = cleanQuestionLine(s.questionText || f.questionText, qNum);
             q.answerLine = cleanAnswerLine(q.letter, s.answerText || f.answerText);
           } else {
             // Section 6: ⚠ Hai lượt không thống nhất
             q.letter = '?';
             q.status = 'warning';
             q.confidence = 'conflict';
-            q.questionLine = cleanQuestionLine(f.questionText || s.questionText, globalStartIndex + idx);
+            q.questionLine = cleanQuestionLine(f.questionText || s.questionText, qNum);
             q.answerLine = `⚠ Lệch đáp án (Lượt 1: ${q.check1} • Lượt 2: ${q.check2})`;
 
             conflicts.push({
@@ -1306,9 +1288,9 @@ async function solveAllQuestions() {
           }
         });
 
-        // Phân Xử Lượt 3 (Nếu có bất đồng & Đã cấu hình Profile 3)
+        // PHÂN XỬ LƯỢT 3 (CHỈ GỌI CHO CÁC CÂU LỆCH NẾU CÓ PROFILE 3)
         if (conflicts.length > 0 && arbitratorProfile && arbitratorProfile.apiKey) {
-          state.currentProcessStage = `Có ${conflicts.length} câu cần phân xử Lượt 3 (${arbitratorProfile.name})${batchLabel}...`;
+          state.currentProcessStage = `⚖ Đang phân xử ${conflicts.length} câu lệch (${arbitratorProfile.name})${batchLabel}...`;
           updateResultBanner();
           showToast(state.currentProcessStage, 'info');
 
@@ -1320,11 +1302,11 @@ async function solveAllQuestions() {
               getArbitrationPrompt(conflicts),
               'arbitration'
             );
-            const arbitrationResults = parseStructuredJson(rawArbitration, conflictImages.length);
+            const arbitrationResults = normalizeStructuredItems(rawArbitration, conflictImages.length);
 
             conflicts.forEach((c, cIdx) => {
               const res = arbitrationResults[cIdx];
-              if (res && res.answerLetter && res.answerLetter !== '?' && !res.uncertain) {
+              if (res && res.answerLetter && res.answerLetter !== '?') {
                 c.question.letter = res.answerLetter;
                 c.question.status = 'done';
                 c.question.confidence = 'arbitrated';
@@ -1373,14 +1355,12 @@ async function solveAllQuestions() {
   }
 }
 
-// Section 6: Kiểm tra lại 1 câu lẻ (Chỉ request lại câu đó, không giải lại cả 15 câu)
+// Section 6: Kiểm tra lại 1 câu lẻ (Chỉ request riêng câu đó)
 async function recheckSingleQuestion(q) {
   if (!q) return;
 
   const card = document.getElementById(`card-${q.id}`);
-  if (card) {
-    card.classList.add('loading');
-  }
+  if (card) card.classList.add('loading');
   q.status = 'loading';
   renderQuestionCard(q);
   renderMatrix();
@@ -1388,11 +1368,12 @@ async function recheckSingleQuestion(q) {
   showToast(`Đang kiểm tra lại riêng Câu ${state.questions.indexOf(q) + 1}...`, 'info');
 
   try {
+    const qIndex = state.questions.indexOf(q);
+
     if (state.mode === 'lookup') {
       const solver = getProfileById(state.lookupProfileId);
-      const raw = await callGeminiApiForProfile(solver, [q], getLookupPrompt(), 'single');
-      const parsed = parseStructuredJson(raw, 1)[0] || {};
-      const qIndex = state.questions.indexOf(q);
+      const raw = await callGeminiApiForProfile(solver, [q], getSystemPrompt(), 'single');
+      const parsed = normalizeStructuredItems(raw, 1)[0] || {};
 
       q.questionLine = cleanQuestionLine(parsed.questionText, qIndex);
       q.answerLine = cleanAnswerLine(parsed.answerLetter, parsed.answerText);
@@ -1404,17 +1385,17 @@ async function recheckSingleQuestion(q) {
       const verifier = getProfileById(state.verifierProfileId);
       const arbitrator = getProfileById(state.arbitratorProfileId);
 
-      // Lượt 1
-      const raw1 = await callGeminiApiForProfile(solver, [q], getSolverPrompt(), 'single');
-      const f = parseStructuredJson(raw1, 1)[0] || {};
+      // Chạy song song cả 2 lượt cho câu lẻ này
+      const [r1, r2] = await Promise.all([
+        callGeminiApiForProfile(solver, [q], getSystemPrompt(), 'single'),
+        callGeminiApiForProfile(verifier, [q], getIndependentCheckPrompt(1), 'single')
+      ]);
 
-      // Lượt 2
-      const raw2 = await callGeminiApiForProfile(verifier, [q], getIndependentVerifierPrompt(1), 'single');
-      const s = parseStructuredJson(raw2, 1)[0] || {};
+      const f = normalizeStructuredItems(r1, 1)[0] || {};
+      const s = normalizeStructuredItems(r2, 1)[0] || {};
 
       q.check1 = f.answerLetter || '?';
       q.check2 = s.answerLetter || '?';
-      const qIndex = state.questions.indexOf(q);
 
       if (q.check1 !== '?' && q.check1 === q.check2) {
         q.letter = q.check1;
@@ -1423,12 +1404,11 @@ async function recheckSingleQuestion(q) {
         q.questionLine = cleanQuestionLine(s.questionText || f.questionText, qIndex);
         q.answerLine = cleanAnswerLine(q.letter, s.answerText || f.answerText);
       } else if (arbitrator && arbitrator.apiKey) {
-        // Phân xử
         const conflict = [{ first: f, second: s, question: q }];
         const raw3 = await callGeminiApiForProfile(arbitrator, [q], getArbitrationPrompt(conflict), 'arbitration');
-        const arb = parseStructuredJson(raw3, 1)[0] || {};
+        const arb = normalizeStructuredItems(raw3, 1)[0] || {};
 
-        if (arb.answerLetter && arb.answerLetter !== '?' && !arb.uncertain) {
+        if (arb.answerLetter && arb.answerLetter !== '?') {
           q.letter = arb.answerLetter;
           q.status = 'done';
           q.confidence = 'arbitrated';
@@ -1561,7 +1541,6 @@ function createQuestionCardElement(q, index) {
   const displayQ = q.questionLine || cleanQuestionLine(q.name, index);
   const displayA = q.answerLine || (q.status === 'loading' ? '' : 'Chưa có đáp án. Bấm GIẢI để xem.');
 
-  // Agreement Badges
   let agreementBadgeHtml = '';
   let conflictBoxHtml = '';
 
@@ -1634,7 +1613,6 @@ function createQuestionCardElement(q, index) {
     </div>
   `;
 
-  // Toggle image
   const toggleBtn = card.querySelector(`#toggle-img-${q.id}`);
   const imgBox = card.querySelector(`#img-box-${q.id}`);
   toggleBtn.addEventListener('click', () => {
@@ -1648,14 +1626,12 @@ function createQuestionCardElement(q, index) {
     }
   });
 
-  // Zoom image
   imgBox.addEventListener('click', () => {
     elements.zoomModalImage.src = q.dataUrl;
     elements.zoomModalTitle.textContent = `Câu ${index + 1}: ${q.name}`;
     elements.imageZoomModal.classList.remove('hidden');
   });
 
-  // Copy single question in exact 2-line format
   const btnQuickCopy = card.querySelector('.btn-quick-copy');
   btnQuickCopy.addEventListener('click', () => {
     const singleText = `${displayQ}\n${displayA}`;
@@ -1664,17 +1640,14 @@ function createQuestionCardElement(q, index) {
     });
   });
 
-  // Re-resolve
   const btnReSolve = card.querySelector('.btn-re-solve');
   btnReSolve.addEventListener('click', () => recheckSingleQuestion(q));
 
-  // Single recheck button in conflict box
   const btnRecheckSingle = card.querySelector('.btn-recheck-single');
   if (btnRecheckSingle) {
     btnRecheckSingle.addEventListener('click', () => recheckSingleQuestion(q));
   }
 
-  // Delete
   const btnDel = card.querySelector('.btn-del-q');
   btnDel.addEventListener('click', () => {
     state.questions = state.questions.filter(item => item.id !== q.id);
@@ -1761,7 +1734,7 @@ async function prepareImageForUpload(file) {
     img.src = originalUrl;
   });
 
-  const maxDimension = 1800;
+  const maxDimension = 1600;
   const scale = Math.min(1, maxDimension / Math.max(image.naturalWidth, image.naturalHeight));
   const width = Math.max(1, Math.round(image.naturalWidth * scale));
   const height = Math.max(1, Math.round(image.naturalHeight * scale));
@@ -1772,7 +1745,7 @@ async function prepareImageForUpload(file) {
   const ctx = canvas.getContext('2d', { alpha: false });
   ctx.drawImage(image, 0, 0, width, height);
 
-  const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
+  const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
   return {
     dataUrl,
     base64: dataUrl.split(',')[1],
@@ -1896,7 +1869,6 @@ function loadDemoQuestions() {
     { q: 'Giá trị của tích phân I = ∫ (0 đến 1) 2x dx bằng bao nhiêu?', a: 'A. 1', l: 'A', c1: 'A', c2: 'A' },
     { q: 'Trong kiến trúc máy tính, 1 Byte tương đương với bao nhiêu Bit?', a: 'B. 8 bit', l: 'B', c1: 'B', c2: 'B' },
     { q: 'Định luật vạn vật hấp dẫn do nhà bác học nào phát minh?', a: 'D. Isaac Newton', l: 'D', c1: 'D', c2: 'D' },
-    // Câu 12 cố tình tạo tình huống lệch để minh họa Kiểm tra chéo & phân xử!
     { q: 'Thủ đô của nước Úc (Australia) là thành phố nào?', a: 'C. Canberra', l: 'C', c1: 'C', c2: 'B', isConflict: true },
     { q: 'Khí nào chiếm tỉ lệ phần trăm thể tích lớn nhất trong không khí?', a: 'A. Nitơ (khoảng 78%)', l: 'A', c1: 'A', c2: 'A' },
     { q: 'Vận tốc ánh sáng truyền trong chân không xấp xỉ bằng bao nhiêu?', a: 'B. 3 x 10^8 m/s', l: 'B', c1: 'B', c2: 'B' },
@@ -1909,7 +1881,6 @@ function loadDemoQuestions() {
     canvas.height = 240;
     const ctx = canvas.getContext('2d');
 
-    // Canvas Card Render
     ctx.fillStyle = '#0f172a';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.strokeStyle = '#334155';
@@ -1932,7 +1903,6 @@ function loadDemoQuestions() {
     ctx.fillText('C. Phương án 3                 D. Phương án 4', 30, 175);
 
     const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
-
     const isConf = Boolean(item.isConflict);
 
     return {
@@ -2065,11 +2035,9 @@ function delay(ms) {
 // 16. Event Listeners Setup
 // ==========================================
 function setupEventListeners() {
-  // Timer Controls
   elements.btnStartTimer.addEventListener('click', toggleTimer);
   elements.btnResetTimer.addEventListener('click', resetTimer);
 
-  // Settings Modal Controls
   elements.btnOpenSettings.addEventListener('click', () => {
     renderProfilesList();
     elements.settingsModal.classList.remove('hidden');
@@ -2080,21 +2048,18 @@ function setupEventListeners() {
     if (e.target === elements.settingsModal) elements.settingsModal.classList.add('hidden');
   });
 
-  // Profile Form Controls
   elements.btnAddNewProfile.addEventListener('click', openAddProfileForm);
   elements.btnCancelProfileForm.addEventListener('click', closeProfileForm);
   elements.btnCancelProfile.addEventListener('click', closeProfileForm);
   elements.btnSaveProfileItem.addEventListener('click', saveProfileFormData);
   elements.btnTestThisKey.addEventListener('click', testFormKey);
 
-  // Toggle API key visibility in form
   elements.btnToggleKeyVisibility.addEventListener('click', () => {
     const isPass = elements.inputProfileKey.type === 'password';
     elements.inputProfileKey.type = isPass ? 'text' : 'password';
     elements.btnToggleKeyVisibility.textContent = isPass ? '🔒' : '👁';
   });
 
-  // Custom model input toggle in profile form
   elements.inputProfileModel.addEventListener('change', () => {
     if (elements.inputProfileModel.value === 'custom') {
       elements.inputCustomModel.classList.remove('hidden');
@@ -2104,7 +2069,6 @@ function setupEventListeners() {
     }
   });
 
-  // Mode Switch Tab Controls
   elements.btnModeLookup.addEventListener('click', () => {
     state.mode = 'lookup';
     saveModeAndAssignments();
@@ -2116,7 +2080,6 @@ function setupEventListeners() {
     updateModeUI();
   });
 
-  // Profile Selectors Change in Mode Bar
   if (elements.selectLookupProfile) {
     elements.selectLookupProfile.addEventListener('change', () => {
       state.lookupProfileId = elements.selectLookupProfile.value;
@@ -2149,13 +2112,11 @@ function setupEventListeners() {
     });
   }
 
-  // Zoom Modal
   elements.btnCloseZoom.addEventListener('click', () => elements.imageZoomModal.classList.add('hidden'));
   elements.imageZoomModal.addEventListener('click', (e) => {
     if (e.target === elements.imageZoomModal) elements.imageZoomModal.classList.add('hidden');
   });
 
-  // Export Modal
   if (elements.btnExportReport) elements.btnExportReport.addEventListener('click', openExportModal);
   if (elements.btnCloseExport) elements.btnCloseExport.addEventListener('click', () => elements.exportModal.classList.add('hidden'));
   if (elements.exportModal) {
@@ -2169,7 +2130,6 @@ function setupEventListeners() {
   if (elements.btnPrintPdf) elements.btnPrintPdf.addEventListener('click', () => window.print());
   if (elements.btnDownloadTxt) elements.btnDownloadTxt.addEventListener('click', downloadTxtFile);
 
-  // Drag and Drop Upload
   elements.dropZone.addEventListener('dragover', (e) => {
     e.preventDefault();
     elements.dropZone.classList.add('dragover');
@@ -2190,7 +2150,6 @@ function setupEventListeners() {
     }
   });
 
-  // Clipboard Paste (Ctrl + V)
   document.addEventListener('paste', (e) => {
     const items = (e.clipboardData || e.originalEvent?.clipboardData)?.items || [];
     const pastedFiles = [];
@@ -2205,7 +2164,6 @@ function setupEventListeners() {
     }
   });
 
-  // Toolbar Actions
   elements.btnSolveAll.addEventListener('click', solveAllQuestions);
   elements.btnSortQuestions.addEventListener('click', sortQuestionsNatural);
   elements.btnRetryFailed.addEventListener('click', retryFailedQuestions);
@@ -2213,12 +2171,10 @@ function setupEventListeners() {
   elements.btnCopyAnswers.addEventListener('click', copyAllAnswers);
   if (elements.btnLoadDemo) elements.btnLoadDemo.addEventListener('click', loadDemoQuestions);
 
-  // Mobile Bottom Bar Actions
   if (elements.btnMobileSolve) elements.btnMobileSolve.addEventListener('click', solveAllQuestions);
   if (elements.btnMobileCopyAll) elements.btnMobileCopyAll.addEventListener('click', copyAllAnswers);
   if (elements.btnMobileDemo) elements.btnMobileDemo.addEventListener('click', loadDemoQuestions);
 
-  // Escape Key
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       elements.settingsModal.classList.add('hidden');
