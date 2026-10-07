@@ -14,13 +14,28 @@
 // 1. Application State & Storage
 // ==========================================
 const DEFAULT_MODELS = [
-  { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash (Khuyên dùng)' },
+  { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash (Khuyên dùng - Ổn định nhất)' },
+  { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash (Tốc độ cao)' },
+  { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash' },
+  { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash (Mới - Dễ quá tải 503)' },
   { id: 'gemini-3.7-flash', name: 'Gemini 3.7 Flash' },
   { id: 'gemini-3.6-flash', name: 'Gemini 3.6 Flash' },
-  { id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash' },
-  { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
-  { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash' }
+  { id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash' }
 ];
+
+function getFallbackModel(currentModel) {
+  const norm = (currentModel || '').toLowerCase().trim();
+  if (norm.includes('3.8') || norm.includes('3.7') || norm.includes('3.6') || norm.includes('3.5')) {
+    return 'gemini-2.5-flash';
+  }
+  if (norm.includes('2.5')) {
+    return 'gemini-2.0-flash';
+  }
+  if (norm.includes('2.0')) {
+    return 'gemini-1.5-flash';
+  }
+  return 'gemini-2.5-flash';
+}
 
 const state = {
   questions: [],
@@ -53,7 +68,7 @@ const state = {
     lastStatus: ''
   },
 
-  maxImagesPerRequest: 15,
+  maxImagesPerRequest: 8,
   maxInlineRequestBytes: 18_500_000,
   promptPreset: 'multiple_choice_only',
 
@@ -149,7 +164,7 @@ function createDefaultProfiles() {
       id: 'prof_' + Date.now() + '_1',
       name: 'Tài khoản chính',
       apiKey: '',
-      model: 'gemini-3.8-flash',
+      model: 'gemini-2.5-flash',
       thinkingLevel: 'high',
       status: 'untested', // 'ready' | 'rate_limited' | 'error' | 'untested'
       lastChecked: null,
@@ -160,7 +175,7 @@ function createDefaultProfiles() {
       id: 'prof_' + (Date.now() + 1) + '_2',
       name: 'Tài khoản phụ 1',
       apiKey: '',
-      model: 'gemini-3.8-flash',
+      model: 'gemini-2.5-flash',
       thinkingLevel: 'high',
       status: 'untested',
       lastChecked: null,
@@ -375,7 +390,7 @@ function openAddProfileForm() {
   elements.profileFormTitle.textContent = 'Thêm API Profile Mới';
   elements.inputProfileName.value = `Tài khoản phụ ${state.profiles.length}`;
   elements.inputProfileKey.value = '';
-  elements.inputProfileModel.value = 'gemini-3.8-flash';
+  elements.inputProfileModel.value = 'gemini-2.5-flash';
   elements.inputCustomModel.value = '';
   elements.inputCustomModel.classList.add('hidden');
   elements.inputProfileThinking.value = 'high';
@@ -418,7 +433,7 @@ function saveProfileFormData() {
   const name = (elements.inputProfileName.value || '').trim() || 'API Profile';
   const apiKey = (elements.inputProfileKey.value || '').trim();
   const selectedModel = elements.inputProfileModel.value === 'custom'
-    ? (elements.inputCustomModel.value || '').trim() || 'gemini-3.8-flash'
+    ? (elements.inputCustomModel.value || '').trim() || 'gemini-2.5-flash'
     : elements.inputProfileModel.value;
   const thinking = elements.inputProfileThinking.value || 'high';
   const editId = elements.editProfileId.value;
@@ -591,7 +606,7 @@ function updateResultBanner() {
     elements.bannerProgressText.textContent = state.currentProcessStage;
   }
   if (elements.bannerRequestStats) {
-    elements.bannerRequestStats.textContent = `Request đã dùng: ${state.requestStats.run}`;
+    elements.bannerRequestStats.textContent = `Request thành công: ${state.requestStats.run}`;
   }
 }
 
@@ -605,9 +620,9 @@ function updateRequestStatsDisplay() {
     breakdown = `Lượt 1: ${r.firstPass} • Lượt 2: ${r.secondPass}${r.arbitration ? ` • Phân xử: ${r.arbitration}` : ''}`;
   }
   if (r.singleRechecks) breakdown += ` • Câu lẻ: ${r.singleRechecks}`;
-  if (r.retries) breakdown += ` • Retry: ${r.retries}`;
+  if (r.retries) breakdown += ` • Thử lại: ${r.retries}`;
 
-  const summary = `Request đã dùng: ${r.run} (${breakdown})`;
+  const summary = `Request thành công: ${r.run} (${breakdown})`;
   if (elements.bannerRequestStats) elements.bannerRequestStats.textContent = summary;
 }
 
@@ -781,13 +796,13 @@ function buildParts(images, prompt) {
 // ==========================================
 // 7. Robust Gemini API Transport
 // ==========================================
-async function callGeminiApiForProfile(profile, images, prompt, kind, retryCount = 0) {
+async function callGeminiApiForProfile(profile, images, prompt, kind, retryCount = 0, fallbackCount = 0) {
   if (!profile || !profile.apiKey) {
     const pName = profile?.name || 'Tài khoản đã chọn';
     throw new Error(`Profile "${pName}" chưa có API key. Vui lòng bấm biểu tượng Cài đặt để nhập key.`);
   }
 
-  const model = profile.model || 'gemini-3.8-flash';
+  const model = profile.model || 'gemini-2.5-flash';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
 
   const generationConfig = {
@@ -810,8 +825,6 @@ async function callGeminiApiForProfile(profile, images, prompt, kind, retryCount
     generationConfig
   };
 
-  registerRequest(kind, profile.name);
-
   try {
     const response = await fetch(url, {
       method: 'POST',
@@ -827,10 +840,24 @@ async function callGeminiApiForProfile(profile, images, prompt, kind, retryCount
     if (!response.ok) {
       const apiMsg = data.error?.message || response.statusText || 'Lỗi không xác định';
 
+      // 503 / High Demand: Tự động chuyển model dự phòng ngay lập tức (Không tốn quota vì Google chưa xử lý)
+      const isHighDemand503 = response.status === 503 || /high demand|temporarily unavailable|overloaded/i.test(apiMsg);
+      if (isHighDemand503 && fallbackCount < 2) {
+        const fallbackModel = getFallbackModel(model);
+        if (fallbackModel && fallbackModel !== model) {
+          showToast(`⚡ Model ${model} quá tải (503), tự động chuyển sang ${fallbackModel} để giải ngay...`, 'info');
+          state.requestStats.retries += 1;
+          updateRequestStatsDisplay();
+          const fallbackProfile = { ...profile, model: fallbackModel };
+          await delay(600);
+          return callGeminiApiForProfile(fallbackProfile, images, prompt, kind, 0, fallbackCount + 1);
+        }
+      }
+
       // 429 = Rate limit/Quota: KHÔNG retry liên tục (Section 1 & 12)
       if (response.status === 429) {
         profile.status = 'rate_limited';
-        profile.lastError = 'API này đang chạm giới hạn sử dụng.';
+        profile.lastError = 'API này đang chạm giới hạn sử dụng (429).';
         saveProfiles();
         throw new Error(`API "${profile.name}" đang chạm giới hạn sử dụng (429).`);
       }
@@ -855,13 +882,13 @@ async function callGeminiApiForProfile(profile, images, prompt, kind, retryCount
         throw new Error(`Yêu cầu không hợp lệ cho "${profile.name}" (400): ${apiMsg}`);
       }
 
-      // 500, 502, 503, 504 = Lỗi dịch vụ tạm thời: Retry tối đa 1-2 lần có backoff
-      if ([500, 502, 503, 504].includes(response.status) && retryCount < 2) {
+      // 500, 502, 504 = Lỗi dịch vụ tạm thời: Retry tối đa 1 lần có backoff
+      if ([500, 502, 504].includes(response.status) && retryCount < 1) {
         state.requestStats.retries += 1;
         updateRequestStatsDisplay();
-        const waitMs = 1200 * Math.pow(2, retryCount) + Math.floor(Math.random() * 400);
+        const waitMs = 1200 + Math.floor(Math.random() * 400);
         await delay(waitMs);
-        return callGeminiApiForProfile(profile, images, prompt, kind, retryCount + 1);
+        return callGeminiApiForProfile(profile, images, prompt, kind, retryCount + 1, fallbackCount);
       }
 
       throw new Error(`Google API (${response.status}): ${apiMsg}`);
@@ -874,6 +901,10 @@ async function callGeminiApiForProfile(profile, images, prompt, kind, retryCount
 
     profile.status = 'ready';
     profile.lastError = null;
+
+    // CHỈ ĐĂNG KÝ REQUEST KHI ĐÃ THÀNH CÔNG 200 OK (Tuyệt đối không đếm ảo khi bị lỗi mạng hoặc 503)
+    registerRequest(kind, profile.name);
+
     return rawText.trim();
   } catch (err) {
     if (err.message === 'PAYLOAD_413_TOO_LARGE') throw err;
@@ -882,12 +913,12 @@ async function callGeminiApiForProfile(profile, images, prompt, kind, retryCount
     const isNetwork = /Failed to fetch|NetworkError|network|timeout|Load failed/i.test(msg);
     const isDomainError = /API này đang chạm|không hoạt động|Yêu cầu không hợp lệ/i.test(msg);
 
-    if (isNetwork && !isDomainError && retryCount < 2) {
+    if (isNetwork && !isDomainError && retryCount < 1) {
       state.requestStats.retries += 1;
       updateRequestStatsDisplay();
-      const waitMs = 1000 * Math.pow(2, retryCount);
+      const waitMs = 1000;
       await delay(waitMs);
-      return callGeminiApiForProfile(profile, images, prompt, kind, retryCount + 1);
+      return callGeminiApiForProfile(profile, images, prompt, kind, retryCount + 1, fallbackCount);
     }
     throw err;
   }
@@ -1025,7 +1056,7 @@ function recompressImage(q, maxDimension, quality) {
 }
 
 async function splitImagesIntoBatches(images) {
-  const maxPerBatch = state.maxImagesPerRequest || 15;
+  const maxPerBatch = Math.min(state.maxImagesPerRequest || 8, 8);
   const batches = [];
   let current = [];
 
@@ -1287,6 +1318,15 @@ async function solveAllQuestions() {
   } catch (err) {
     console.error('Lỗi khi giải:', err);
     state.currentProcessStage = `Lỗi: ${err.message}`;
+    pendingQuestions.forEach(q => {
+      if (q.status === 'loading') {
+        q.status = 'error';
+        q.letter = '?';
+        q.answerLine = `Chưa có đáp án (${err.message.includes('503') ? 'Google quá tải tạm thời' : err.message})`;
+      }
+    });
+    renderQuestions();
+    renderMatrix();
     updateResultBanner();
     showToast(`Không thể hoàn tất: ${err.message}`, 'error');
   } finally {
