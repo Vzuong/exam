@@ -39,17 +39,40 @@ const DEFAULT_XKIRO_VISION_MODELS = [
   { id: 'openai/gpt-6.1-sol', name: 'openai/gpt-6.1-sol', modality: 'chat', accessTier: 'paid', isFree: false, capabilities: { vision: true, reasoning: true } }
 ];
 
-// Cấu hình giới hạn Payload riêng biệt cho từng Provider (PHẦN 3)
+// Giới hạn HTTP Inline chính thức của Google Gemini REST API
+const GOOGLE_INLINE_LIMITS = {
+  safeBytes: 18_500_000,    // 18.5 MB
+  absoluteBytes: 20_000_000 // 20 MB (Giới hạn HTTP inline của Google Gemini)
+};
+
+// Cấu hình Heuristic phía Client (LƯU Ý: Đây là heuristic nội bộ của app để bảo vệ RAM, KHÔNG PHẢI giới hạn của xKiro):
+// xKiro KHÔNG có giới hạn 8.5 MB hay 10 MB trong tài liệu chính thức; xKiro quản lý qua Context Window (Tokens)
+// và 95s timeout (được bypass hoàn toàn bằng stream: true).
+const APP_CLIENT_HEURISTICS = {
+  maxClientBufferBytes: 35_000_000, // 35 MB (Heuristic client buffer để bảo vệ bộ nhớ RAM trình duyệt mobile)
+  maxImagesPerRequest: 15           // Giữ nguyên tối đa 15 ảnh mỗi lượt
+};
+
 const PAYLOAD_LIMITS = {
-  google: {
-    safeBytes: 18_500_000,    // 18.5 MB
-    absoluteBytes: 20_000_000 // 20 MB (Giới hạn HTTP inline của Google Gemini)
-  },
+  google: GOOGLE_INLINE_LIMITS,
   xkiro: {
-    safeBytes: 8_500_000,     // 8.5 MB (Ngưỡng an toàn cho Chat Completions OpenAI-compatible)
-    absoluteBytes: 10_000_000 // 10 MB (Giới hạn payload tiêu chuẩn OpenAI-compatible)
+    isHeuristic: true,
+    note: 'App client heuristic only - KHÔNG PHẢI giới hạn của xKiro',
+    safeBytes: APP_CLIENT_HEURISTICS.maxClientBufferBytes,
+    absoluteBytes: 50_000_000
   }
 };
+
+/**
+ * Kiểm tra xem lỗi có phải do vượt quá Payload size (HTTP 413) hoặc Context Window / Token limit (HTTP 400) hay không
+ */
+function isPayloadOrContextError(err) {
+  if (!err) return false;
+  const msg = typeof err === 'string' ? err : (err.message || String(err));
+  return msg === 'PAYLOAD_OR_CONTEXT_TOO_LARGE' ||
+         msg === 'PAYLOAD_413_TOO_LARGE' ||
+         /context.*length|token.*limit|payload.*too large|too large|exceeded.*limit|entity too large/i.test(msg);
+}
 
 const state = {
   questions: [],
@@ -1218,13 +1241,16 @@ async function executeSingleGeminiHttp(profile, modelToUse, images, prompt) {
     updateRequestStatsDisplay();
     const apiMsg = data.error?.message || response.statusText || 'Lỗi Google không xác định';
 
-    // 413 = Payload Too Large
-    if (response.status === 413) {
-      throw new Error('PAYLOAD_413_TOO_LARGE');
+    // 413 = Payload Too Large hoặc Context Length
+    if (response.status === 413 || /payload.*too large/i.test(apiMsg)) {
+      throw new Error('PAYLOAD_OR_CONTEXT_TOO_LARGE');
     }
 
-    // 400 = Invalid request
+    // 400 = Invalid request hoặc context length exceeded
     if (response.status === 400) {
+      if (/context.*length|token.*limit|too large/i.test(apiMsg)) {
+        throw new Error('PAYLOAD_OR_CONTEXT_TOO_LARGE');
+      }
       profile.status = 'error';
       profile.lastError = `Yêu cầu không hợp lệ (400): ${apiMsg}`;
       saveProfiles();
@@ -1299,8 +1325,104 @@ async function executeSingleGeminiHttp(profile, modelToUse, images, prompt) {
 }
 
 /**
+ * Đọc toàn bộ luồng Server-Sent Events (SSE) từ HTTP response stream của xKiro (OpenAI format):
+ * - Hỗ trợ Web Streams API (response.body.getReader()) trên trình duyệt và Node.js
+ * - Fallback text() cho môi trường không có streaming reader
+ * - Gom toàn bộ delta.content từ các dòng "data: { ... }"
+ * - Dừng an toàn khi gặp "data: [DONE]"
+ * - Trả về toàn bộ chuỗi JSON thô hoàn chỉnh
+ */
+async function readSSEStreamContent(response) {
+  let fullText = '';
+
+  if (response.body && typeof response.body.getReader === 'function') {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // Giữ lại phần dư chưa kết thúc dòng
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith(':')) continue;
+        if (trimmed === 'data: [DONE]') break;
+        if (trimmed.startsWith('data: ')) {
+          const jsonStr = trimmed.slice(6).trim();
+          if (jsonStr === '[DONE]') break;
+          try {
+            const parsed = JSON.parse(jsonStr);
+            if (parsed.error) {
+              const errMsg = parsed.error.message || JSON.stringify(parsed.error);
+              if (/context.*length|token.*limit|payload.*too large|too large/i.test(errMsg)) {
+                throw new Error('PAYLOAD_OR_CONTEXT_TOO_LARGE');
+              }
+              throw new Error(`Lỗi SSE từ xKiro: ${errMsg}`);
+            }
+            const delta = parsed.choices?.[0]?.delta?.content ||
+                          parsed.choices?.[0]?.delta?.text ||
+                          parsed.choices?.[0]?.message?.content || '';
+            fullText += delta;
+          } catch (e) {
+            if (isPayloadOrContextError(e) || e.message?.startsWith('Lỗi SSE')) throw e;
+          }
+        }
+      }
+    }
+
+    if (buffer && buffer.trim()) {
+      const trimmed = buffer.trim();
+      if (trimmed.startsWith('data: ') && trimmed !== 'data: [DONE]') {
+        const jsonStr = trimmed.slice(6).trim();
+        if (jsonStr !== '[DONE]') {
+          try {
+            const parsed = JSON.parse(jsonStr);
+            const delta = parsed.choices?.[0]?.delta?.content ||
+                          parsed.choices?.[0]?.delta?.text ||
+                          parsed.choices?.[0]?.message?.content || '';
+            fullText += delta;
+          } catch (_) {}
+        }
+      }
+    }
+  } else if (typeof response.text === 'function') {
+    const raw = await response.text();
+    const lines = raw.split('\n');
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('data: ') && trimmed !== 'data: [DONE]') {
+        const jsonStr = trimmed.slice(6).trim();
+        if (jsonStr !== '[DONE]') {
+          try {
+            const parsed = JSON.parse(jsonStr);
+            const delta = parsed.choices?.[0]?.delta?.content ||
+                          parsed.choices?.[0]?.delta?.text ||
+                          parsed.choices?.[0]?.message?.content || '';
+            fullText += delta;
+          } catch (_) {}
+        }
+      }
+    }
+    if (!fullText && raw.trim().startsWith('{')) {
+      try {
+        const parsed = JSON.parse(raw);
+        fullText = parsed.choices?.[0]?.message?.content || '';
+      } catch (_) {}
+    }
+  }
+
+  return fullText.trim();
+}
+
+/**
  * Gửi HTTP request tới xKiro API (https://api.xkiro.com/v1/chat/completions)
  * Tuân thủ chuẩn OpenAI-compatible Chat Completions có hỗ trợ Vision qua mảng Content
+ * Kích hoạt stream: true để bypass giới hạn 95s blocking timeout của xKiro
  */
 async function executeSingleXKiroHttp(profile, modelToUse, images, prompt) {
   state.requestStats.totalAttempts += 1;
@@ -1329,6 +1451,7 @@ async function executeSingleXKiroHttp(profile, modelToUse, images, prompt) {
 
   const payload = {
     model: modelToUse, // Giữ đầy đủ vendor/model prefix, ví dụ openai/gpt-6.1-sol
+    stream: true,      // Kích hoạt SSE streaming để bypass timeout 95s của xKiro
     messages: [
       {
         role: 'user',
@@ -1369,21 +1492,24 @@ async function executeSingleXKiroHttp(profile, modelToUse, images, prompt) {
     };
   }
 
-  const data = await response.json().catch(() => ({}));
-
+  // Khi có lỗi HTTP, xKiro trả về JSON lỗi tiêu chuẩn
   if (!response.ok) {
     state.requestStats.failedAttempts += 1;
     state.requestStats.xkiroFailed += 1;
     updateRequestStatsDisplay();
+    const data = await response.json().catch(() => ({}));
     const apiMsg = data.error?.message || response.statusText || 'Lỗi xKiro không xác định';
 
-    // 413 = Payload Too Large
-    if (response.status === 413) {
-      throw new Error('PAYLOAD_413_TOO_LARGE');
+    // 413 = Payload Too Large hoặc Context Length
+    if (response.status === 413 || /payload.*too large|request.*too large/i.test(apiMsg)) {
+      throw new Error('PAYLOAD_OR_CONTEXT_TOO_LARGE');
     }
 
-    // 400 = Invalid request
+    // 400 = Invalid request hoặc context length exceeded
     if (response.status === 400) {
+      if (/context.*length|maximum.*context|token.*limit/i.test(apiMsg)) {
+        throw new Error('PAYLOAD_OR_CONTEXT_TOO_LARGE');
+      }
       profile.status = 'error';
       profile.lastError = `Yêu cầu không hợp lệ (400): ${apiMsg}`;
       saveProfiles();
@@ -1447,7 +1573,25 @@ async function executeSingleXKiroHttp(profile, modelToUse, images, prompt) {
     };
   }
 
-  const rawText = data.choices?.[0]?.message?.content || '';
+  // 200 OK: Đọc Server-Sent Events (SSE) stream, gom toàn bộ content trước khi trả về
+  let rawText = '';
+  try {
+    rawText = await readSSEStreamContent(response);
+  } catch (streamErr) {
+    if (isPayloadOrContextError(streamErr)) {
+      throw streamErr;
+    }
+    state.requestStats.failedAttempts += 1;
+    state.requestStats.xkiroFailed += 1;
+    updateRequestStatsDisplay();
+    return {
+      ok: false,
+      status: 0,
+      isTransient: true,
+      errorMsg: `Lỗi đọc luồng stream xKiro: ${streamErr.message}`
+    };
+  }
+
   if (!rawText.trim()) {
     state.requestStats.failedAttempts += 1;
     state.requestStats.xkiroFailed += 1;
@@ -1456,7 +1600,7 @@ async function executeSingleXKiroHttp(profile, modelToUse, images, prompt) {
       ok: false,
       status: response.status,
       isTransient: true,
-      errorMsg: `xKiro (${profile.name}) không trả về nội dung kết quả.`
+      errorMsg: `xKiro (${profile.name}) stream không trả về nội dung kết quả.`
     };
   }
 
@@ -1560,7 +1704,7 @@ async function callAIProfile(requestedProfile, images, prompt, kind) {
     try {
       res = await executeSingleAIHttp(activeProf, activeModel, images, prompt);
     } catch (callErr) {
-      if (callErr.message === 'PAYLOAD_413_TOO_LARGE') throw callErr;
+      if (isPayloadOrContextError(callErr)) throw callErr;
       res = {
         ok: false,
         status: 0,
@@ -1607,7 +1751,7 @@ async function callAIProfile(requestedProfile, images, prompt, kind) {
       try {
         res = await executeSingleAIHttp(activeProf, activeModel, images, prompt);
       } catch (retryErr) {
-        if (retryErr.message === 'PAYLOAD_413_TOO_LARGE') throw retryErr;
+        if (isPayloadOrContextError(retryErr)) throw retryErr;
         res = { ok: false, status: 0, isTransient: false, errorMsg: retryErr.message };
       }
 
@@ -1648,7 +1792,7 @@ async function callAIProfile(requestedProfile, images, prompt, kind) {
       try {
         mRes = await executeSingleGeminiHttp(googleProf, fModel, images, prompt);
       } catch (err) {
-        if (err.message === 'PAYLOAD_413_TOO_LARGE') throw err;
+        if (isPayloadOrContextError(err)) throw err;
         mRes = { ok: false, status: 0, isTransient: true, errorMsg: err.message };
       }
 
@@ -1664,7 +1808,7 @@ async function callAIProfile(requestedProfile, images, prompt, kind) {
         try {
           mRes = await executeSingleGeminiHttp(googleProf, fModel, images, prompt);
         } catch (err) {
-          if (err.message === 'PAYLOAD_413_TOO_LARGE') throw err;
+          if (isPayloadOrContextError(err)) throw err;
           mRes = { ok: false, status: 0, isTransient: false, errorMsg: err.message };
         }
         if (mRes.ok) {
@@ -1711,7 +1855,7 @@ async function callAIProfile(requestedProfile, images, prompt, kind) {
         try {
           mRes = await executeSingleXKiroHttp(xkiroProf, fModel, images, prompt);
         } catch (err) {
-          if (err.message === 'PAYLOAD_413_TOO_LARGE') throw err;
+          if (isPayloadOrContextError(err)) throw err;
           mRes = { ok: false, status: 0, isTransient: true, errorMsg: err.message };
         }
 
@@ -1727,7 +1871,7 @@ async function callAIProfile(requestedProfile, images, prompt, kind) {
           try {
             mRes = await executeSingleXKiroHttp(xkiroProf, fModel, images, prompt);
           } catch (err) {
-            if (err.message === 'PAYLOAD_413_TOO_LARGE') throw err;
+            if (isPayloadOrContextError(err)) throw err;
             mRes = { ok: false, status: 0, isTransient: false, errorMsg: err.message };
           }
           if (mRes.ok) {
@@ -1819,11 +1963,77 @@ function fallbackRegexParse(rawText, count) {
 }
 
 // ==========================================
-// 9. Adaptive Payload Budget & Image Batching
+// 9. Adaptive Payload, Token Estimation & Model Context Batching
 // ==========================================
 
 /**
- * Ước lượng payload kích thước byte cho Google Gemini REST request (PHẦN 3)
+ * Lấy kích thước Context Window (Tokens) theo từng model cụ thể:
+ * - Google Gemini: 1,000,000 tokens
+ * - xKiro models:
+ *   + qwen/qwen-plus*: 128,000 tokens
+ *   + qwen/qwen3-vl-plus*: 32,768 tokens (an toàn)
+ *   + mistralai/ministral-14b: 32,768 tokens
+ *   + openai/gpt-6.1-sol / gpt-4*: 128,000 tokens
+ *   + Mặc định: 32,768 tokens
+ */
+function getModelContextWindow(modelId, provider = 'google') {
+  if (provider === 'google' || (!String(modelId || '').includes('/') && !String(provider || '').includes('xkiro'))) {
+    return 1_000_000;
+  }
+
+  const m = String(modelId || '').toLowerCase();
+  if (m.includes('gemini')) return 1_000_000;
+  if (m.includes('qwen-plus') || m.includes('qwen-max')) return 128_000;
+  if (m.includes('qwen') || m.includes('ministral') || m.includes('mistral')) return 32_768;
+  if (m.includes('gpt-4') || m.includes('gpt-6') || m.includes('claude')) return 128_000;
+  return 32_768;
+}
+
+/**
+ * Ước lượng tokens cho 1 ảnh dựa trên độ phân giải pixel/tiles:
+ * Chuẩn Vision (OpenAI / Qwen-VL):
+ * - Chia ảnh thành các tile 512x512 pixels
+ * - Mỗi tile tiêu thụ ~170 tokens + 85 base tokens
+ * - Với ảnh thi nén tiêu chuẩn (~800-1200px): ~800–1,200 tokens/ảnh
+ */
+function estimateImageTokens(img) {
+  if (!img) return 1000;
+  const width = img.naturalWidth || img.width;
+  const height = img.naturalHeight || img.height;
+  if (width && height && width > 0 && height > 0) {
+    const maxSide = Math.max(width, height);
+    const scale = maxSide > 2048 ? (2048 / maxSide) : 1;
+    const scaledW = Math.round(width * scale);
+    const scaledH = Math.round(height * scale);
+    const tilesW = Math.max(1, Math.ceil(scaledW / 512));
+    const tilesH = Math.max(1, Math.ceil(scaledH / 512));
+    return 85 + (tilesW * tilesH * 170);
+  }
+  // Heuristic từ dung lượng base64 nếu ảnh chưa được render vào DOM Image
+  const b64Len = String(img.base64 || img.dataUrl || '').length;
+  if (b64Len > 0) {
+    return Math.max(800, Math.min(2500, Math.round(b64Len / 650)));
+  }
+  return 1000;
+}
+
+/**
+ * Ước lượng tổng số tokens của toàn bộ request (Prompt + Images + Output tokens):
+ */
+function estimateRequestTokens(images, prompt = '') {
+  const promptTokens = Math.ceil(String(prompt || '').length / 2.5);
+  const imagesTokens = (images || []).reduce((sum, img) => sum + estimateImageTokens(img), 0);
+  const outputBudgetTokens = 4096; // Dự trữ cho structured JSON output
+  return {
+    promptTokens,
+    imagesTokens,
+    outputBudgetTokens,
+    total: promptTokens + imagesTokens + outputBudgetTokens
+  };
+}
+
+/**
+ * Ước lượng payload kích thước byte cho Google Gemini REST request
  */
 function estimateGooglePayloadSize(images, prompt = '') {
   if (!images || images.length === 0) return 0;
@@ -1833,7 +2043,7 @@ function estimateGooglePayloadSize(images, prompt = '') {
 }
 
 /**
- * Ước lượng payload kích thước byte cho xKiro chat/completions REST request (PHẦN 3)
+ * Ước lượng payload kích thước byte cho xKiro chat/completions REST request
  */
 function estimateXKiroPayloadSize(images, prompt = '') {
   if (!images || images.length === 0) return 0;
@@ -1858,12 +2068,40 @@ function estimatePayloadBytes(images) {
   return estimateGooglePayloadSize(images);
 }
 
-async function fitImagesWithinBudget(images, provider = 'google', prompt = '') {
-  const normProv = (provider === 'xkiro') ? 'xkiro' : 'google';
-  const limits = PAYLOAD_LIMITS[normProv] || PAYLOAD_LIMITS.google;
-  const targetBytes = limits.safeBytes;
+/**
+ * Kiểm tra batch ảnh có vừa ngân sách Context Window và Byte Payload hay không:
+ * - Context Window: Token ước lượng <= Model Context Window
+ * - Byte Payload:
+ *   + Google: <= 18.5 MB (giới hạn HTTP inline của Google)
+ *   + xKiro: <= 35 MB (App client heuristic tránh quá tải RAM trình duyệt, KHÔNG PHẢI giới hạn xKiro)
+ */
+function checkBatchFitsBudget(candidateImages, profile, prompt = '') {
+  const provider = (profile && profile.provider === 'xkiro') ? 'xkiro' : 'google';
+  const modelId = profile?.model || '';
+  const contextWindow = getModelContextWindow(modelId, provider);
+  const tokenEst = estimateRequestTokens(candidateImages, prompt);
 
-  if (estimatePayloadForProvider(normProv, images, prompt) <= targetBytes) return true;
+  if (tokenEst.total > contextWindow) {
+    return false;
+  }
+
+  if (provider === 'google') {
+    if (estimateGooglePayloadSize(candidateImages, prompt) > GOOGLE_INLINE_LIMITS.safeBytes) {
+      return false;
+    }
+  } else {
+    // xKiro: Dùng app client heuristic bảo vệ RAM thiết bị
+    if (estimateXKiroPayloadSize(candidateImages, prompt) > APP_CLIENT_HEURISTICS.maxClientBufferBytes) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+async function fitImagesWithinBudget(images, provider = 'google', prompt = '', profile = null) {
+  const prof = profile || (provider === 'xkiro' ? { provider: 'xkiro' } : { provider: 'google' });
+  if (checkBatchFitsBudget(images, prof, prompt)) return true;
 
   if (typeof document !== 'undefined' && typeof Image !== 'undefined') {
     const qualitySteps = [
@@ -1880,7 +2118,7 @@ async function fitImagesWithinBudget(images, provider = 'google', prompt = '') {
           await recompressImage(q, step.maxDim, step.quality);
         }
       }
-      if (estimatePayloadForProvider(normProv, images, prompt) <= targetBytes) {
+      if (checkBatchFitsBudget(images, prof, prompt)) {
         return true;
       }
     }
@@ -1922,39 +2160,41 @@ function recompressImage(q, maxDimension, quality) {
 }
 
 /**
- * Tách danh sách ảnh theo Provider cụ thể (PHẦN 3 & PHẦN 4):
- * - profile.provider === "google" -> dùng giới hạn Google (safeBytes 18.5 MB)
- * - profile.provider === "xkiro" -> dùng giới hạn xKiro (safeBytes 8.5 MB)
- * - Tối đa 15 ảnh (MAX_IMAGES = 15). Nếu 15 ảnh nhỏ -> tạo 1 batch 15!
+ * Tách danh sách ảnh thành các batch:
+ * Nguyên tắc chia batch:
+ * 1. Số ảnh tối đa: 15 ảnh / batch (MAX_IMAGES = 15). Nếu <= 15 ảnh và vừa ngân sách -> giải trong 1 batch duy nhất!
+ * 2. Context Window của model: ước lượng token/pixel để không vượt quá context window của model đã chọn.
+ * 3. Ngưỡng dung lượng HTTP:
+ *    - Google: tối đa 18.5 MB (giới hạn HTTP inline của Google)
+ *    - xKiro: tối đa 35 MB (Heuristic nội bộ của app bảo vệ RAM client, KHÔNG PHẢI giới hạn xKiro)
  */
 async function splitImagesForProvider(profile, images, prompt = '') {
   const provider = (profile && profile.provider === 'xkiro') ? 'xkiro' : 'google';
-  const limits = PAYLOAD_LIMITS[provider] || PAYLOAD_LIMITS.google;
-  const maxPerBatch = state.maxImagesPerRequest || 15;
+  const maxPerBatch = Math.min(15, state.maxImagesPerRequest || 15);
   const batches = [];
   let current = [];
 
   for (const img of images) {
     if (current.length >= maxPerBatch) {
-      await fitImagesWithinBudget(current, provider, prompt);
+      await fitImagesWithinBudget(current, provider, prompt, profile);
       batches.push(current);
       current = [];
     }
 
     const testCandidate = [...current, img];
-    const fits = await fitImagesWithinBudget(testCandidate, provider, prompt);
+    const fits = checkBatchFitsBudget(testCandidate, profile, prompt);
 
     if (fits && testCandidate.length <= maxPerBatch) {
       current = testCandidate;
     } else {
       if (current.length > 0) {
-        await fitImagesWithinBudget(current, provider, prompt);
+        await fitImagesWithinBudget(current, provider, prompt, profile);
         batches.push(current);
         current = [img];
-        await fitImagesWithinBudget(current, provider, prompt);
+        await fitImagesWithinBudget(current, provider, prompt, profile);
       } else {
         current = [img];
-        await fitImagesWithinBudget(current, provider, prompt);
+        await fitImagesWithinBudget(current, provider, prompt, profile);
         batches.push(current);
         current = [];
       }
@@ -1962,11 +2202,11 @@ async function splitImagesForProvider(profile, images, prompt = '') {
   }
 
   if (current.length > 0) {
-    await fitImagesWithinBudget(current, provider, prompt);
+    await fitImagesWithinBudget(current, provider, prompt, profile);
     batches.push(current);
   }
 
-  console.log(`[splitImagesForProvider] Provider: ${provider}, Images: ${images.length}, SafeBytes: ${limits.safeBytes}, Batches: [${batches.map(b => b.length).join(', ')}]`);
+  console.log(`[splitImagesForProvider] Provider: ${provider}, Model: ${profile?.model || 'default'}, Images: ${images.length}, Batches: [${batches.map(b => b.length).join(', ')}]`);
   return batches;
 }
 
@@ -2028,173 +2268,208 @@ async function solveAllQuestions() {
   resetRequestStats();
 
   try {
-    const batches = await splitImagesIntoBatches(pendingQuestions);
-    state.requestStats.batches = batches.length;
+    const initialBatches = await splitImagesIntoBatches(pendingQuestions);
+    const batchQueue = [...initialBatches];
+    state.requestStats.batches = batchQueue.length;
     updateRequestStatsDisplay();
 
-    let globalStartIndex = 0;
+    while (batchQueue.length > 0) {
+      const batch = batchQueue.shift();
+      const batchIndices = batch.map(q => state.questions.indexOf(q) + 1);
+      const batchLabel = (initialBatches.length > 1 || batchQueue.length > 0)
+        ? ` (Câu ${batchIndices[0]}–${batchIndices[batchIndices.length - 1]})`
+        : '';
 
-    for (let bIndex = 0; bIndex < batches.length; bIndex++) {
-      const batch = batches[bIndex];
-      const batchLabel = batches.length > 1 ? ` (Batch ${bIndex + 1}/${batches.length})` : '';
-
-      if (state.mode === 'lookup') {
-        // ========================================
-        // CHẾ ĐỘ 1: CHỈ TRA (1 request per batch)
-        // ========================================
-        const solverProfile = getProfileById(state.lookupProfileId);
-        state.currentProcessStage = `Đang phân tích ảnh ${globalStartIndex + 1}–${globalStartIndex + batch.length}${batchLabel}...`;
-        updateResultBanner();
-        showToast(state.currentProcessStage, 'info');
-
-        const rawResult = await callGeminiApiForProfile(solverProfile, batch, getLookupPrompt(), 'lookup');
-        const parsed = parseStructuredJson(rawResult, batch.length);
-
-        batch.forEach((q, idx) => {
-          const item = parsed[idx] || {};
-          const qNum = globalStartIndex + idx;
-          q.questionLine = cleanQuestionLine(item.questionText, qNum);
-          q.answerLine = cleanAnswerLine(item.answerLetter, item.answerText);
-          q.letter = item.answerLetter || '?';
-          q.status = q.letter !== '?' ? 'done' : 'warning';
-          q.confidence = 'single-pass';
-          q.check1 = q.letter;
-          q.check2 = null;
-          q.check3 = null;
-        });
-
-      } else {
-        // ========================================
-        // CHẾ ĐỘ 2: KIỂM TRA CHÉO (Pass 1 + Pass 2 Độc Lập)
-        // ========================================
-        const solverProfile = getProfileById(state.solverProfileId);
-        const verifierProfile = getProfileById(state.verifierProfileId);
-        const arbitratorProfile = getProfileById(state.arbitratorProfileId);
-
-        // Lượt 1: Giải độc lập với Profile 1
-        state.currentProcessStage = `Đang phân tích Lượt 1 (${solverProfile.name})${batchLabel}...`;
-        updateResultBanner();
-        showToast(state.currentProcessStage, 'info');
-
-        const rawFirst = await callGeminiApiForProfile(solverProfile, batch, getSolverPrompt(), 'first');
-        const firstPass = parseStructuredJson(rawFirst, batch.length);
-
-        // Cập nhật tạm thời để người dùng thấy đáp án Lượt 1 ngay
-        batch.forEach((q, idx) => {
-          const item = firstPass[idx] || {};
-          const qNum = globalStartIndex + idx;
-          q.questionLine = cleanQuestionLine(item.questionText, qNum);
-          q.answerLine = cleanAnswerLine(item.answerLetter, item.answerText);
-          q.letter = item.answerLetter || '?';
-          q.check1 = item.answerLetter || '?';
-          q.status = 'loading';
-        });
-        renderQuestions();
-        renderMatrix();
-
-        // Lượt 2: Giải độc lập từ ảnh gốc với Profile 2 (KHÔNG nhìn đáp án lượt 1!)
-        state.currentProcessStage = `Đang kiểm tra chéo độc lập Lượt 2 (${verifierProfile.name})${batchLabel}...`;
-        updateResultBanner();
-        showToast(state.currentProcessStage, 'info');
-
-        let secondPass;
-        try {
-          const rawSecond = await callGeminiApiForProfile(verifierProfile, batch, getIndependentVerifierPrompt(batch.length), 'second');
-          secondPass = parseStructuredJson(rawSecond, batch.length);
-        } catch (secondErr) {
-          console.error('Lỗi Lượt 2:', secondErr);
-          // Giữ kết quả lượt 1 nếu lượt 2 gặp lỗi (Section 12)
-          batch.forEach((q, idx) => {
-            q.status = 'warning';
-            q.check2 = '!';
-            q.answerLine += ` (Lượt 2 lỗi: ${secondErr.message})`;
-          });
-          renderQuestions();
-          renderMatrix();
-          globalStartIndex += batch.length;
-          continue;
-        }
-
-        // Đối Soát Lượt 1 vs Lượt 2
-        state.currentProcessStage = `Đang đối chiếu kết quả 2 lượt${batchLabel}...`;
-        updateResultBanner();
-
-        const conflicts = [];
-
-        batch.forEach((q, idx) => {
-          const f = firstPass[idx] || {};
-          const s = secondPass[idx] || {};
-          q.check1 = f.answerLetter || '?';
-          q.check2 = s.answerLetter || '?';
-
-          const isAgreed = q.check1 !== '?' && q.check1 === q.check2;
-
-          if (isAgreed) {
-            // Section 5: ✓ Hai lượt thống nhất
-            q.letter = q.check1;
-            q.status = 'done';
-            q.confidence = 'agreed';
-            q.questionLine = cleanQuestionLine(s.questionText || f.questionText, globalStartIndex + idx);
-            q.answerLine = cleanAnswerLine(q.letter, s.answerText || f.answerText);
-          } else {
-            // Section 6: ⚠ Hai lượt không thống nhất
-            q.letter = '?';
-            q.status = 'warning';
-            q.confidence = 'conflict';
-            q.questionLine = cleanQuestionLine(f.questionText || s.questionText, globalStartIndex + idx);
-            q.answerLine = `⚠ Lệch đáp án (Lượt 1: ${q.check1} • Lượt 2: ${q.check2})`;
-
-            conflicts.push({
-              localIndex: idx,
-              question: q,
-              first: f,
-              second: s
-            });
-          }
-        });
-
-        // Phân Xử Lượt 3 (Nếu có bất đồng & Đã cấu hình Profile 3)
-        if (conflicts.length > 0 && arbitratorProfile && arbitratorProfile.apiKey) {
-          state.currentProcessStage = `Có ${conflicts.length} câu cần phân xử Lượt 3 (${arbitratorProfile.name})${batchLabel}...`;
+      try {
+        if (state.mode === 'lookup') {
+          // ========================================
+          // CHẾ ĐỘ 1: CHỈ TRA (1 request per batch)
+          // ========================================
+          const solverProfile = getProfileById(state.lookupProfileId);
+          state.currentProcessStage = `Đang phân tích ${batch.length} ảnh${batchLabel}...`;
           updateResultBanner();
           showToast(state.currentProcessStage, 'info');
 
-          try {
-            const conflictImages = conflicts.map(c => c.question);
-            const rawArbitration = await callGeminiApiForProfile(
-              arbitratorProfile,
-              conflictImages,
-              getArbitrationPrompt(conflicts),
-              'arbitration'
-            );
-            const arbitrationResults = parseStructuredJson(rawArbitration, conflictImages.length);
+          const rawResult = await callGeminiApiForProfile(solverProfile, batch, getLookupPrompt(), 'lookup');
+          const parsed = parseStructuredJson(rawResult, batch.length);
 
-            conflicts.forEach((c, cIdx) => {
-              const res = arbitrationResults[cIdx];
-              if (res && res.answerLetter && res.answerLetter !== '?' && !res.uncertain) {
-                c.question.letter = res.answerLetter;
-                c.question.status = 'done';
-                c.question.confidence = 'arbitrated';
-                c.question.check3 = res.answerLetter;
-                c.question.answerLine = cleanAnswerLine(res.answerLetter, res.answerText);
-              } else {
-                c.question.letter = '?';
-                c.question.status = 'warning';
-                c.question.confidence = 'uncertain';
-                c.question.check3 = '?';
-                c.question.answerLine = 'Không xác định chắc chắn';
-              }
+          batch.forEach((q, idx) => {
+            const item = parsed[idx] || {};
+            const qNum = state.questions.indexOf(q);
+            q.questionLine = cleanQuestionLine(item.questionText, qNum);
+            q.answerLine = cleanAnswerLine(item.answerLetter, item.answerText);
+            q.letter = item.answerLetter || '?';
+            q.status = q.letter !== '?' ? 'done' : 'warning';
+            q.confidence = 'single-pass';
+            q.check1 = q.letter;
+            q.check2 = null;
+            q.check3 = null;
+          });
+
+        } else {
+          // ========================================
+          // CHẾ ĐỘ 2: KIỂM TRA CHÉO (Pass 1 + Pass 2 Độc Lập)
+          // ========================================
+          const solverProfile = getProfileById(state.solverProfileId);
+          const verifierProfile = getProfileById(state.verifierProfileId);
+          const arbitratorProfile = getProfileById(state.arbitratorProfileId);
+
+          // Lượt 1: Giải độc lập với Profile 1
+          state.currentProcessStage = `Đang phân tích Lượt 1 (${solverProfile.name})${batchLabel}...`;
+          updateResultBanner();
+          showToast(state.currentProcessStage, 'info');
+
+          const rawFirst = await callGeminiApiForProfile(solverProfile, batch, getSolverPrompt(), 'first');
+          const firstPass = parseStructuredJson(rawFirst, batch.length);
+
+          // Cập nhật tạm thời để người dùng thấy đáp án Lượt 1 ngay
+          batch.forEach((q, idx) => {
+            const item = firstPass[idx] || {};
+            const qNum = state.questions.indexOf(q);
+            q.questionLine = cleanQuestionLine(item.questionText, qNum);
+            q.answerLine = cleanAnswerLine(item.answerLetter, item.answerText);
+            q.letter = item.answerLetter || '?';
+            q.check1 = item.answerLetter || '?';
+            q.status = 'loading';
+          });
+          renderQuestions();
+          renderMatrix();
+
+          // Lượt 2: Giải độc lập từ ảnh gốc với Profile 2 (KHÔNG nhìn đáp án lượt 1!)
+          state.currentProcessStage = `Đang kiểm tra chéo độc lập Lượt 2 (${verifierProfile.name})${batchLabel}...`;
+          updateResultBanner();
+          showToast(state.currentProcessStage, 'info');
+
+          let secondPass;
+          try {
+            const rawSecond = await callGeminiApiForProfile(verifierProfile, batch, getIndependentVerifierPrompt(batch.length), 'second');
+            secondPass = parseStructuredJson(rawSecond, batch.length);
+          } catch (secondErr) {
+            if (isPayloadOrContextError(secondErr)) throw secondErr;
+            console.error('Lỗi Lượt 2:', secondErr);
+            // Giữ kết quả lượt 1 nếu lượt 2 gặp lỗi không phải do payload
+            batch.forEach((q, idx) => {
+              q.status = 'warning';
+              q.check2 = '!';
+              q.answerLine += ` (Lượt 2 lỗi: ${secondErr.message})`;
             });
-          } catch (arbErr) {
-            console.error('Lỗi phân xử Lượt 3:', arbErr);
-            showToast(`Lỗi phân xử: ${arbErr.message}`, 'error');
+            renderQuestions();
+            renderMatrix();
+            continue;
+          }
+
+          // Đối Soát Lượt 1 vs Lượt 2
+          state.currentProcessStage = `Đang đối chiếu kết quả 2 lượt${batchLabel}...`;
+          updateResultBanner();
+
+          const conflicts = [];
+
+          batch.forEach((q, idx) => {
+            const f = firstPass[idx] || {};
+            const s = secondPass[idx] || {};
+            const qNum = state.questions.indexOf(q);
+            q.check1 = f.answerLetter || '?';
+            q.check2 = s.answerLetter || '?';
+
+            const isAgreed = q.check1 !== '?' && q.check1 === q.check2;
+
+            if (isAgreed) {
+              // Section 5: ✓ Hai lượt thống nhất
+              q.letter = q.check1;
+              q.status = 'done';
+              q.confidence = 'agreed';
+              q.questionLine = cleanQuestionLine(s.questionText || f.questionText, qNum);
+              q.answerLine = cleanAnswerLine(q.letter, s.answerText || f.answerText);
+            } else {
+              // Section 6: ⚠ Hai lượt không thống nhất
+              q.letter = '?';
+              q.status = 'warning';
+              q.confidence = 'conflict';
+              q.questionLine = cleanQuestionLine(f.questionText || s.questionText, qNum);
+              q.answerLine = `⚠ Lệch đáp án (Lượt 1: ${q.check1} • Lượt 2: ${q.check2})`;
+
+              conflicts.push({
+                localIndex: idx,
+                question: q,
+                first: f,
+                second: s
+              });
+            }
+          });
+
+          // Phân Xử Lượt 3 (Nếu có bất đồng & Đã cấu hình Profile 3)
+          if (conflicts.length > 0 && arbitratorProfile && arbitratorProfile.apiKey) {
+            state.currentProcessStage = `Có ${conflicts.length} câu cần phân xử Lượt 3 (${arbitratorProfile.name})${batchLabel}...`;
+            updateResultBanner();
+            showToast(state.currentProcessStage, 'info');
+
+            try {
+              const conflictImages = conflicts.map(c => c.question);
+              const rawArbitration = await callGeminiApiForProfile(
+                arbitratorProfile,
+                conflictImages,
+                getArbitrationPrompt(conflicts),
+                'arbitration'
+              );
+              const arbitrationResults = parseStructuredJson(rawArbitration, conflictImages.length);
+
+              conflicts.forEach((c, cIdx) => {
+                const res = arbitrationResults[cIdx];
+                if (res && res.answerLetter && res.answerLetter !== '?' && !res.uncertain) {
+                  c.question.letter = res.answerLetter;
+                  c.question.status = 'done';
+                  c.question.confidence = 'arbitrated';
+                  c.question.check3 = res.answerLetter;
+                  c.question.answerLine = cleanAnswerLine(res.answerLetter, res.answerText);
+                } else {
+                  c.question.letter = '?';
+                  c.question.status = 'warning';
+                  c.question.confidence = 'uncertain';
+                  c.question.check3 = '?';
+                  c.question.answerLine = 'Không xác định chắc chắn';
+                }
+              });
+            } catch (arbErr) {
+              console.error('Lỗi phân xử Lượt 3:', arbErr);
+              showToast(`Lỗi phân xử: ${arbErr.message}`, 'error');
+            }
           }
         }
-      }
 
-      renderQuestions();
-      renderMatrix();
-      globalStartIndex += batch.length;
+        renderQuestions();
+        renderMatrix();
+      } catch (batchErr) {
+        // XỬ LÝ LỖI THỰC TẾ: HTTP 413 (Payload Too Large) hoặc HTTP 400 (Context Length / Token Limit)
+        if (isPayloadOrContextError(batchErr) && batch.length > 1) {
+          const mid = Math.ceil(batch.length / 2);
+          const half1 = batch.slice(0, mid);
+          const half2 = batch.slice(mid);
+          batchQueue.unshift(half2);
+          batchQueue.unshift(half1);
+          state.requestStats.batches = state.requestStats.batches + 1;
+          updateRequestStatsDisplay();
+
+          const splitNotice = `⚠ Vượt ngưỡng context/kích thước từ server (413/400) ➔ Tự động chia nhỏ batch (${batch.length} ➔ ${half1.length} + ${half2.length} ảnh) để giải tiếp...`;
+          state.currentProcessStage = splitNotice;
+          updateResultBanner();
+          showToast(splitNotice, 'warning');
+          console.warn(splitNotice, batchErr);
+          continue;
+        }
+
+        if (isPayloadOrContextError(batchErr) && batch.length === 1) {
+          const q = batch[0];
+          q.status = 'error';
+          q.letter = '?';
+          q.answerLine = `Ảnh vượt quá giới hạn payload/context của model (413/400). Hãy chụp gần hoặc crop nhỏ hơn.`;
+          renderQuestionCard(q);
+          renderMatrix();
+          showToast(`Câu ${state.questions.indexOf(q) + 1} vượt quá context/kích thước tối đa của model.`, 'error');
+          continue;
+        }
+
+        throw batchErr;
+      }
     }
 
     state.currentProcessStage = '✓ Đã hoàn tất xử lý';
