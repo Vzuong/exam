@@ -463,45 +463,56 @@ function renderProfilesList() {
   });
 }
 
-async function fetchXKiroVisionModels(apiKey = '') {
+async function fetchXKiroVisionModels() {
   if (state.cachedXKiroModels && state.cachedXKiroModels.length > 0) {
     return state.cachedXKiroModels;
   }
 
-  const headers = {};
-  if (apiKey && apiKey.trim()) {
-    headers['Authorization'] = 'Bearer ' + apiKey.trim();
+  let res;
+  try {
+    res = await fetch('https://api.xkiro.com/v1/models', {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json'
+      }
+    });
+  } catch (netErr) {
+    throw new Error('Không thể kết nối tới xKiro. Kiểm tra mạng, DNS hoặc proxy.');
   }
-
-  const res = await fetch('https://api.xkiro.com/v1/models', { headers }).catch(err => {
-    throw new Error('Không thể kết nối tới catalog xKiro (GET /v1/models). Kiểm tra mạng.');
-  });
 
   if (!res.ok) {
-    throw new Error(`Lỗi tải catalog xKiro (${res.status}): ${res.statusText}`);
+    throw new Error(`xKiro catalog trả HTTP ${res.status}.`);
   }
 
-  const data = await res.json().catch(() => ({}));
-  const list = data.data || [];
+  let data;
+  try {
+    data = await res.json();
+  } catch (_) {
+    throw new Error('Không thể kết nối tới catalog xKiro (GET /v1/models).');
+  }
 
-  // Lọc nghiêm ngặt:
-  // - modality = chat
-  // - capabilities.vision = true
-  // - loại trừ TTS, image gen, audio, embedding nếu có
+  const list = data?.data;
+  if (!Array.isArray(list)) {
+    throw new Error('Không thể kết nối tới catalog xKiro (GET /v1/models).');
+  }
+
+  // Lọc model dùng cho vision theo yêu cầu FastExam AI:
+  // m.modality === "chat" && m.capabilities?.vision === true
   const visionModels = list.filter(m => {
-    if (m.modality !== 'chat') return false;
-    if (!m.capabilities || !m.capabilities.vision) return false;
-    if (/tts|whisper|dall-e|flux|embed|moderation/i.test(m.id)) return false;
-    return true;
+    return m.modality === 'chat' && m.capabilities?.vision === true;
   }).map(m => {
-    const isFree = m.access_tier === 'free' || (typeof m.id === 'string' && m.id.endsWith(':free'));
+    const isFree = m.access_tier === 'free';
     return {
-      id: m.id, // Giữ đầy đủ vendor/model, ví dụ openai/gpt-6.1-sol
-      name: m.id,
+      id: m.id,
+      name: m.display_name ? `${m.id} (${m.display_name})` : m.id,
+      displayName: m.display_name || m.id,
       modality: m.modality || 'chat',
-      capabilities: m.capabilities || { vision: true },
-      accessTier: isFree ? 'free' : (m.access_tier || 'paid'),
+      accessTier: m.access_tier || (isFree ? 'free' : 'paid'),
       isFree: isFree,
+      contextLength: m.context_length,
+      maxOutputTokens: m.max_output_tokens,
+      capabilities: m.capabilities || { vision: true },
+      reasoningEfforts: m.reasoning_efforts || null,
       hasReasoning: Boolean(m.capabilities?.reasoning),
       reasoningLevels: m.reasoning_efforts?.levels || []
     };
@@ -819,7 +830,7 @@ async function testXKiroApiKeyCall(apiKey, selectedModel = '') {
   }
 
   // 1. Kiểm tra catalog và vision models
-  const visionModels = await fetchXKiroVisionModels(apiKey);
+  const visionModels = await fetchXKiroVisionModels();
 
   // 2. Gửi probe request nhỏ tới POST /v1/chat/completions để xác nhận key hợp lệ và model hoạt động
   const probeModel = (selectedModel && selectedModel !== 'custom') ? selectedModel : getBestXKiroDefaultModel(visionModels);
