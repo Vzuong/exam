@@ -30,13 +30,26 @@ const FALLBACK_MODELS_CHAIN = [
 ];
 
 // Danh sách model Vision xKiro dự phòng (khi chưa tải catalog từ GET /v1/models)
+// Cấu hình rõ ràng modality: 'chat', accessTier: 'free' / 'paid', capabilities.vision = true
 const DEFAULT_XKIRO_VISION_MODELS = [
-  { id: 'qwen/qwen-plus-2025-07-28:free', name: '[FREE] qwen/qwen-plus-2025-07-28:free (Khuyên dùng)', isFree: true, hasReasoning: true },
-  { id: 'qwen/qwen3-vl-plus:free', name: '[FREE] qwen/qwen3-vl-plus:free', isFree: true, hasReasoning: true },
-  { id: 'mistralai/ministral-14b', name: '[FREE] mistralai/ministral-14b', isFree: true, hasReasoning: false },
-  { id: 'google/gemini-3.6-flash', name: 'google/gemini-3.6-flash', isFree: false, hasReasoning: true },
-  { id: 'openai/gpt-6.1-sol', name: 'openai/gpt-6.1-sol', isFree: false, hasReasoning: true }
+  { id: 'qwen/qwen-plus-2025-07-28:free', name: '[FREE] qwen/qwen-plus-2025-07-28:free (Khuyên dùng)', modality: 'chat', accessTier: 'free', isFree: true, capabilities: { vision: true, reasoning: true } },
+  { id: 'qwen/qwen3-vl-plus:free', name: '[FREE] qwen/qwen3-vl-plus:free', modality: 'chat', accessTier: 'free', isFree: true, capabilities: { vision: true, reasoning: true } },
+  { id: 'mistralai/ministral-14b', name: '[FREE] mistralai/ministral-14b', modality: 'chat', accessTier: 'free', isFree: true, capabilities: { vision: true, reasoning: false } },
+  { id: 'google/gemini-3.6-flash', name: 'google/gemini-3.6-flash', modality: 'chat', accessTier: 'paid', isFree: false, capabilities: { vision: true, reasoning: true } },
+  { id: 'openai/gpt-6.1-sol', name: 'openai/gpt-6.1-sol', modality: 'chat', accessTier: 'paid', isFree: false, capabilities: { vision: true, reasoning: true } }
 ];
+
+// Cấu hình giới hạn Payload riêng biệt cho từng Provider (PHẦN 3)
+const PAYLOAD_LIMITS = {
+  google: {
+    safeBytes: 18_500_000,    // 18.5 MB
+    absoluteBytes: 20_000_000 // 20 MB (Giới hạn HTTP inline của Google Gemini)
+  },
+  xkiro: {
+    safeBytes: 8_500_000,     // 8.5 MB (Ngưỡng an toàn cho Chat Completions OpenAI-compatible)
+    absoluteBytes: 10_000_000 // 10 MB (Giới hạn payload tiêu chuẩn OpenAI-compatible)
+  }
+};
 
 const state = {
   questions: [],
@@ -84,7 +97,7 @@ const state = {
 
   maxImages: 15,
   maxImagesPerRequest: 15,
-  maxInlineRequestBytes: 18_500_000,
+  payloadLimits: PAYLOAD_LIMITS,
   promptPreset: 'multiple_choice_only',
 
   timer: {
@@ -457,14 +470,19 @@ async function fetchXKiroVisionModels(apiKey = '') {
     if (!m.capabilities || !m.capabilities.vision) return false;
     if (/tts|whisper|dall-e|flux|embed|moderation/i.test(m.id)) return false;
     return true;
-  }).map(m => ({
-    id: m.id, // Giữ đầy đủ vendor/model, ví dụ openai/gpt-6.1-sol
-    name: m.id,
-    accessTier: m.access_tier || 'paid',
-    isFree: m.access_tier === 'free',
-    hasReasoning: Boolean(m.capabilities?.reasoning),
-    reasoningLevels: m.reasoning_efforts?.levels || []
-  }));
+  }).map(m => {
+    const isFree = m.access_tier === 'free' || (typeof m.id === 'string' && m.id.endsWith(':free'));
+    return {
+      id: m.id, // Giữ đầy đủ vendor/model, ví dụ openai/gpt-6.1-sol
+      name: m.id,
+      modality: m.modality || 'chat',
+      capabilities: m.capabilities || { vision: true },
+      accessTier: isFree ? 'free' : (m.access_tier || 'paid'),
+      isFree: isFree,
+      hasReasoning: Boolean(m.capabilities?.reasoning),
+      reasoningLevels: m.reasoning_efforts?.levels || []
+    };
+  });
 
   state.cachedXKiroModels = visionModels;
   return visionModels;
@@ -484,6 +502,32 @@ function getBestXKiroDefaultModel(visionModels) {
   if (p3) return p3.id;
   // 4. Model đầu tiên
   return visionModels[0].id;
+}
+
+/**
+ * Lọc danh sách model xKiro dự phòng AN TOÀN cho AUTO-FALLBACK:
+ * CHỈ ĐƯỢC DÙNG model thỏa mãn 3 điều kiện (PHẦN 1 & 2):
+ * 1. modality === "chat"
+ * 2. capabilities.vision === true
+ * 3. access_tier === "free" (hoặc isFree: true)
+ * Tuyệt đối KHÔNG tự động fallback sang model paid, premium, yêu cầu billing.
+ * Nếu không tìm thấy model free phù hợp -> trả về [] để dừng fallback và báo lỗi.
+ */
+function getXKiroFreeVisionFallbackModels(currentModelId) {
+  const catalog = (state.cachedXKiroModels && state.cachedXKiroModels.length > 0)
+    ? state.cachedXKiroModels
+    : DEFAULT_XKIRO_VISION_MODELS;
+
+  return catalog
+    .filter(m => {
+      const isChat = m.modality ? m.modality === 'chat' : true;
+      const isVision = m.capabilities ? Boolean(m.capabilities.vision) : true;
+      const isFree = (m.accessTier === 'free' || m.access_tier === 'free' || m.isFree === true) &&
+                     m.accessTier !== 'paid' && m.access_tier !== 'paid' && !m.isPaid;
+      const isDifferent = m.id !== currentModelId;
+      return isChat && isVision && isFree && isDifferent;
+    })
+    .map(m => m.id);
 }
 
 async function onProviderChanged(provider, preserveModel = '') {
@@ -566,8 +610,8 @@ async function onProviderChanged(provider, preserveModel = '') {
         visionModels = DEFAULT_XKIRO_VISION_MODELS;
       }
 
-      const freeModels = visionModels.filter(m => m.isFree || m.id.includes(':free') || m.id.startsWith('mistralai/'));
-      const paidModels = visionModels.filter(m => !freeModels.some(f => f.id === m.id));
+      const freeModels = visionModels.filter(m => m.isFree || m.accessTier === 'free');
+      const paidModels = visionModels.filter(m => !m.isFree && m.accessTier !== 'free');
 
       let optHtml = '';
       if (freeModels.length > 0) {
@@ -1184,7 +1228,13 @@ async function executeSingleGeminiHttp(profile, modelToUse, images, prompt) {
       profile.status = 'error';
       profile.lastError = `Yêu cầu không hợp lệ (400): ${apiMsg}`;
       saveProfiles();
-      throw new Error(`Yêu cầu Google không hợp lệ cho "${profile.name}" (400): ${apiMsg}`);
+      return {
+        ok: false,
+        status: 400,
+        isBadRequest: true,
+        isTransient: false,
+        errorMsg: `Yêu cầu Google không hợp lệ cho "${profile.name}" (400): ${apiMsg}`
+      };
     }
 
     // 401 / 403 = Invalid key
@@ -1192,15 +1242,27 @@ async function executeSingleGeminiHttp(profile, modelToUse, images, prompt) {
       profile.status = 'error';
       profile.lastError = 'API key Google không hoạt động hoặc không có quyền truy cập.';
       saveProfiles();
-      throw new Error(`API key Google của "${profile.name}" không hợp lệ (${response.status}): ${apiMsg}`);
+      return {
+        ok: false,
+        status: response.status,
+        isAuthError: true,
+        isTransient: false,
+        errorMsg: `API key Google của "${profile.name}" không hợp lệ (${response.status}): ${apiMsg}`
+      };
     }
 
-    // 429 = Rate limit
+    // 429 = Rate limit (PHẦN 7: không retry cùng profile, chuyển profile khác)
     if (response.status === 429) {
       profile.status = 'rate_limited';
       profile.lastError = 'API Google này đang chạm giới hạn sử dụng (429).';
       saveProfiles();
-      throw new Error(`API Google "${profile.name}" đang chạm giới hạn sử dụng (429).`);
+      return {
+        ok: false,
+        status: 429,
+        isRateLimit: true,
+        isTransient: false,
+        errorMsg: `API Google "${profile.name}" đang chạm giới hạn sử dụng (429).`
+      };
     }
 
     const isTransient = [500, 502, 503, 504].includes(response.status) || /high demand|temporarily unavailable|overloaded/i.test(apiMsg);
@@ -1325,7 +1387,13 @@ async function executeSingleXKiroHttp(profile, modelToUse, images, prompt) {
       profile.status = 'error';
       profile.lastError = `Yêu cầu không hợp lệ (400): ${apiMsg}`;
       saveProfiles();
-      throw new Error(`Yêu cầu xKiro không hợp lệ cho "${profile.name}" (400): ${apiMsg}`);
+      return {
+        ok: false,
+        status: 400,
+        isBadRequest: true,
+        isTransient: false,
+        errorMsg: `Yêu cầu xKiro không hợp lệ cho "${profile.name}" (400): ${apiMsg}`
+      };
     }
 
     // 401 = Invalid Key / Disabled
@@ -1333,7 +1401,13 @@ async function executeSingleXKiroHttp(profile, modelToUse, images, prompt) {
       profile.status = 'error';
       profile.lastError = 'API key xKiro không hợp lệ hoặc đã bị vô hiệu hóa (401).';
       saveProfiles();
-      throw new Error(`API key xKiro của "${profile.name}" không hợp lệ (401): ${apiMsg}`);
+      return {
+        ok: false,
+        status: 401,
+        isAuthError: true,
+        isTransient: false,
+        errorMsg: `API key xKiro của "${profile.name}" không hợp lệ (401): ${apiMsg}`
+      };
     }
 
     // 403 = Forbidden
@@ -1341,15 +1415,27 @@ async function executeSingleXKiroHttp(profile, modelToUse, images, prompt) {
       profile.status = 'error';
       profile.lastError = 'Tài khoản xKiro không có quyền truy cập model đã chọn (403).';
       saveProfiles();
-      throw new Error(`Tài khoản xKiro "${profile.name}" không có quyền truy cập (403): ${apiMsg}`);
+      return {
+        ok: false,
+        status: 403,
+        isAuthError: true,
+        isTransient: false,
+        errorMsg: `Tài khoản xKiro "${profile.name}" không có quyền truy cập (403): ${apiMsg}`
+      };
     }
 
-    // 429 = Rate limit
+    // 429 = Rate limit (PHẦN 7: không retry cùng profile, chuyển profile khác)
     if (response.status === 429) {
       profile.status = 'rate_limited';
       profile.lastError = 'xKiro đang chạm giới hạn sử dụng hoặc hết quota (429).';
       saveProfiles();
-      throw new Error(`API xKiro "${profile.name}" chạm giới hạn sử dụng (429).`);
+      return {
+        ok: false,
+        status: 429,
+        isRateLimit: true,
+        isTransient: false,
+        errorMsg: `API xKiro "${profile.name}" chạm giới hạn sử dụng (429).`
+      };
     }
 
     const isTransient = [500, 502, 503, 504].includes(response.status) || /temporarily unavailable|overloaded|gateway timeout/i.test(apiMsg);
@@ -1429,10 +1515,13 @@ async function callAIProfile(requestedProfile, images, prompt, kind) {
   state.requestStats.fallbackNotice = '';
   updateResultBanner();
 
+  // PHẦN 8: Theo dõi visitedProfiles để tuyệt đối không lặp lại profile trong cùng 1 request job
+  const visitedProfiles = new Set();
+
   // Tạo danh sách Candidate Profiles hợp lệ
   const candidateProfiles = [requestedProfile];
   (state.profiles || []).forEach(p => {
-    if (p.id !== requestedProfile.id && p.apiKey && p.apiKey.trim() && p.status !== 'rate_limited') {
+    if (p.id !== requestedProfile.id && p.apiKey && p.apiKey.trim()) {
       candidateProfiles.push(p);
     }
   });
@@ -1444,6 +1533,13 @@ async function callAIProfile(requestedProfile, images, prompt, kind) {
   // ========================================================
   for (let i = 0; i < candidateProfiles.length; i++) {
     const activeProf = candidateProfiles[i];
+
+    // PHẦN 8: Nếu profile đã nằm trong visitedProfiles trong cùng job -> KHÔNG gọi lại
+    if (visitedProfiles.has(activeProf.id)) {
+      continue;
+    }
+    visitedProfiles.add(activeProf.id);
+
     const activeModel = activeProf.model;
     const activeProvName = activeProf.provider === 'xkiro' ? 'xKiro' : 'Google Gemini';
 
@@ -1451,8 +1547,8 @@ async function callAIProfile(requestedProfile, images, prompt, kind) {
     state.requestStats.actualProvider = activeProvName;
     state.requestStats.actualModelName = activeModel;
 
-    if (i > 0) {
-      const switchNotice = `⚠ Profile "${requestedProfile.name}" quá tải ➔ Đã chuyển sang "${activeProf.name}" (${activeProvName} · ${activeModel})`;
+    if (activeProf.id !== requestedProfile.id) {
+      const switchNotice = `⚠ Profile "${requestedProfile.name}" không khả dụng ➔ Đã chuyển sang "${activeProf.name}" (${activeProvName} · ${activeModel})`;
       state.requestStats.fallbackNotice = switchNotice;
       state.currentProcessStage = switchNotice;
       updateResultBanner();
@@ -1460,10 +1556,21 @@ async function callAIProfile(requestedProfile, images, prompt, kind) {
     }
 
     // Thử gọi lần 1 trên Profile này
-    let res = await executeSingleAIHttp(activeProf, activeModel, images, prompt);
+    let res;
+    try {
+      res = await executeSingleAIHttp(activeProf, activeModel, images, prompt);
+    } catch (callErr) {
+      if (callErr.message === 'PAYLOAD_413_TOO_LARGE') throw callErr;
+      res = {
+        ok: false,
+        status: 0,
+        isTransient: true,
+        errorMsg: callErr.message || 'Lỗi kết nối không xác định'
+      };
+    }
 
     if (res.ok) {
-      if (i > 0) {
+      if (activeProf.id !== requestedProfile.id) {
         state.requestStats.fallbackNotice = `✓ Hoàn tất bằng ${activeProf.name} (${activeProvName} · ${activeModel})`;
       }
       registerSuccessByKind(kind);
@@ -1473,15 +1580,39 @@ async function callAIProfile(requestedProfile, images, prompt, kind) {
 
     lastTransientError = res.errorMsg;
 
-    // Retry tối đa 1 lần nếu là lỗi tạm thời (503, 502, 504, timeout...)
+    // PHẦN 7: 429 = Rate limit / Quota profile
+    // -> failedAttempts đã được ghi
+    // -> TUYỆT ĐỐI KHÔNG retry cùng Profile này!
+    // -> Chuyển ngay sang Profile khác nếu có (Profile Fallback)
+    if (res.status === 429) {
+      const rNotice = `⚠ Profile "${activeProf.name}" (${activeProvName}) chạm giới hạn 429 ➔ Chuyển profile khác...`;
+      state.currentProcessStage = rNotice;
+      state.requestStats.fallbackNotice = rNotice;
+      updateResultBanner();
+      continue;
+    }
+
+    // PHẦN 9: 401 / 403 / 400: Không retry, chuyển profile tiếp theo
+    if (res.status === 401 || res.status === 403 || res.status === 400) {
+      continue;
+    }
+
+    // PHẦN 9: 503 / 502 / 504 / Network timeout
+    // temporary backend overload -> retry cùng profile TỐI ĐA 1 LẦN
     if (res.isTransient) {
-      state.currentProcessStage = `${activeProf.name} (${activeModel}) quá tải ➔ Đang thử lại (Retry 1/1)...`;
+      state.currentProcessStage = `${activeProf.name} (${activeModel}) quá tải (${res.status || 'Mạng'}) ➔ Đang thử lại (Retry 1/1)...`;
       updateResultBanner();
       await delay(1500 + Math.floor(Math.random() * 500));
 
-      res = await executeSingleAIHttp(activeProf, activeModel, images, prompt);
+      try {
+        res = await executeSingleAIHttp(activeProf, activeModel, images, prompt);
+      } catch (retryErr) {
+        if (retryErr.message === 'PAYLOAD_413_TOO_LARGE') throw retryErr;
+        res = { ok: false, status: 0, isTransient: false, errorMsg: retryErr.message };
+      }
+
       if (res.ok) {
-        if (i > 0) {
+        if (activeProf.id !== requestedProfile.id) {
           state.requestStats.fallbackNotice = `✓ Hoàn tất bằng ${activeProf.name} (${activeProvName} · ${activeModel})`;
         }
         registerSuccessByKind(kind);
@@ -1489,16 +1620,20 @@ async function callAIProfile(requestedProfile, images, prompt, kind) {
         return res.data;
       }
       lastTransientError = res.errorMsg;
+      // Sau 1 lần retry vẫn lỗi -> chuyển sang profile tiếp theo
     }
   }
 
   // ========================================================
-  // GIAI ĐOẠN 2: MODEL FALLBACK (Khi tất cả Profile ứng viên đều quá tải)
+  // GIAI ĐOẠN 2: MODEL FALLBACK (Khi các Profile bị quá tải 503)
+  // Chỉ thực hiện trên Profile không bị lỗi 401/403 và không bị rate limit 429
   // ========================================================
   // 1. Thử fallback trên Profile Google nếu có
-  const googleProf = candidateProfiles.find(p => p.provider !== 'xkiro');
+  const googleProf = candidateProfiles.find(p => p.provider !== 'xkiro' && p.status !== 'error' && p.status !== 'rate_limited');
   if (googleProf) {
     for (const fModel of FALLBACK_MODELS_CHAIN) {
+      if (fModel === googleProf.model) continue;
+
       state.requestStats.actualProfileName = googleProf.name;
       state.requestStats.actualProvider = 'Google Gemini';
       state.requestStats.actualModelName = fModel;
@@ -1509,7 +1644,14 @@ async function callAIProfile(requestedProfile, images, prompt, kind) {
       updateResultBanner();
       showToast(modelNotice, 'info');
 
-      let mRes = await executeSingleGeminiHttp(googleProf, fModel, images, prompt);
+      let mRes;
+      try {
+        mRes = await executeSingleGeminiHttp(googleProf, fModel, images, prompt);
+      } catch (err) {
+        if (err.message === 'PAYLOAD_413_TOO_LARGE') throw err;
+        mRes = { ok: false, status: 0, isTransient: true, errorMsg: err.message };
+      }
+
       if (mRes.ok) {
         state.requestStats.fallbackNotice = `✓ Hoàn tất bằng ${googleProf.name} · ${fModel}`;
         registerSuccessByKind(kind);
@@ -1519,7 +1661,12 @@ async function callAIProfile(requestedProfile, images, prompt, kind) {
 
       if (mRes.isTransient) {
         await delay(1500);
-        mRes = await executeSingleGeminiHttp(googleProf, fModel, images, prompt);
+        try {
+          mRes = await executeSingleGeminiHttp(googleProf, fModel, images, prompt);
+        } catch (err) {
+          if (err.message === 'PAYLOAD_413_TOO_LARGE') throw err;
+          mRes = { ok: false, status: 0, isTransient: false, errorMsg: err.message };
+        }
         if (mRes.ok) {
           state.requestStats.fallbackNotice = `✓ Hoàn tất bằng ${googleProf.name} · ${fModel}`;
           registerSuccessByKind(kind);
@@ -1531,40 +1678,64 @@ async function callAIProfile(requestedProfile, images, prompt, kind) {
   }
 
   // 2. Thử fallback trên Profile xKiro nếu có
-  const xkiroProf = candidateProfiles.find(p => p.provider === 'xkiro');
+  const xkiroProf = candidateProfiles.find(p => p.provider === 'xkiro' && p.status !== 'error' && p.status !== 'rate_limited');
   if (xkiroProf) {
-    const xkiroChain = (state.cachedXKiroModels || DEFAULT_XKIRO_VISION_MODELS)
-      .map(m => m.id)
-      .filter(id => id !== xkiroProf.model)
-      .slice(0, 3);
+    // PHẦN 1, 2 & 11:
+    // AUTO-FALLBACK xKiro CHỈ ĐƯỢC DÙNG model:
+    // - modality === "chat"
+    // - capabilities.vision === true
+    // - access_tier === "free"
+    // TUYỆT ĐỐI KHÔNG FALLBACK SANG PAID / PREMIUM / BILLING!
+    const xkiroFreeChain = getXKiroFreeVisionFallbackModels(xkiroProf.model);
 
-    for (const fModel of xkiroChain) {
-      state.requestStats.actualProfileName = xkiroProf.name;
-      state.requestStats.actualProvider = 'xKiro';
-      state.requestStats.actualModelName = fModel;
-
-      const modelNotice = `⚠ Tất cả Profile đều quá tải ➔ Đang thử model dự phòng xKiro: ${fModel}`;
-      state.requestStats.fallbackNotice = modelNotice;
-      state.currentProcessStage = modelNotice;
+    if (!xkiroFreeChain || xkiroFreeChain.length === 0) {
+      const noFreeMsg = 'Không tìm thấy model xKiro miễn phí phù hợp để fallback.';
+      state.requestStats.fallbackNotice = noFreeMsg;
+      state.currentProcessStage = noFreeMsg;
       updateResultBanner();
-      showToast(modelNotice, 'info');
+      showToast(noFreeMsg, 'warning');
+      console.warn(noFreeMsg);
+    } else {
+      for (const fModel of xkiroFreeChain.slice(0, 3)) {
+        state.requestStats.actualProfileName = xkiroProf.name;
+        state.requestStats.actualProvider = 'xKiro';
+        state.requestStats.actualModelName = fModel;
 
-      let mRes = await executeSingleXKiroHttp(xkiroProf, fModel, images, prompt);
-      if (mRes.ok) {
-        state.requestStats.fallbackNotice = `✓ Hoàn tất bằng ${xkiroProf.name} · ${fModel}`;
-        registerSuccessByKind(kind);
-        updateRequestStatsDisplay();
-        return mRes.data;
-      }
+        const modelNotice = `⚠ Tất cả Profile đều quá tải ➔ Đang thử model dự phòng xKiro miễn phí: ${fModel}`;
+        state.requestStats.fallbackNotice = modelNotice;
+        state.currentProcessStage = modelNotice;
+        updateResultBanner();
+        showToast(modelNotice, 'info');
 
-      if (mRes.isTransient) {
-        await delay(1500);
-        mRes = await executeSingleXKiroHttp(xkiroProf, fModel, images, prompt);
+        let mRes;
+        try {
+          mRes = await executeSingleXKiroHttp(xkiroProf, fModel, images, prompt);
+        } catch (err) {
+          if (err.message === 'PAYLOAD_413_TOO_LARGE') throw err;
+          mRes = { ok: false, status: 0, isTransient: true, errorMsg: err.message };
+        }
+
         if (mRes.ok) {
-          state.requestStats.fallbackNotice = `✓ Hoàn tất bằng ${xkiroProf.name} · ${fModel}`;
+          state.requestStats.fallbackNotice = `✓ Hoàn tất bằng ${xkiroProf.name} · ${fModel} [FREE]`;
           registerSuccessByKind(kind);
           updateRequestStatsDisplay();
           return mRes.data;
+        }
+
+        if (mRes.isTransient) {
+          await delay(1500);
+          try {
+            mRes = await executeSingleXKiroHttp(xkiroProf, fModel, images, prompt);
+          } catch (err) {
+            if (err.message === 'PAYLOAD_413_TOO_LARGE') throw err;
+            mRes = { ok: false, status: 0, isTransient: false, errorMsg: err.message };
+          }
+          if (mRes.ok) {
+            state.requestStats.fallbackNotice = `✓ Hoàn tất bằng ${xkiroProf.name} · ${fModel} [FREE]`;
+            registerSuccessByKind(kind);
+            updateRequestStatsDisplay();
+            return mRes.data;
+          }
         }
       }
     }
@@ -1650,36 +1821,79 @@ function fallbackRegexParse(rawText, count) {
 // ==========================================
 // 9. Adaptive Payload Budget & Image Batching
 // ==========================================
-function estimatePayloadBytes(images) {
+
+/**
+ * Ước lượng payload kích thước byte cho Google Gemini REST request (PHẦN 3)
+ */
+function estimateGooglePayloadSize(images, prompt = '') {
+  if (!images || images.length === 0) return 0;
   const base64Bytes = images.reduce((sum, q) => sum + String(q.base64 || '').length, 0);
-  return base64Bytes + 15000;
+  const jsonOverhead = images.length * 350 + (prompt ? prompt.length * 2 : 0) + 2000;
+  return base64Bytes + jsonOverhead;
 }
 
-async function fitImagesWithinBudget(images) {
-  const targetBytes = state.maxInlineRequestBytes || 18_500_000;
-  if (estimatePayloadBytes(images) <= targetBytes) return true;
+/**
+ * Ước lượng payload kích thước byte cho xKiro chat/completions REST request (PHẦN 3)
+ */
+function estimateXKiroPayloadSize(images, prompt = '') {
+  if (!images || images.length === 0) return 0;
+  const base64Bytes = images.reduce((sum, q) => sum + String(q.base64 || '').length, 0);
+  const jsonOverhead = images.length * 480 + (prompt ? prompt.length * 2 : 0) + 3000;
+  return base64Bytes + jsonOverhead;
+}
 
-  const qualitySteps = [
-    { maxDim: 1650, quality: 0.80 },
-    { maxDim: 1450, quality: 0.72 },
-    { maxDim: 1250, quality: 0.65 },
-    { maxDim: 1050, quality: 0.55 },
-    { maxDim: 900,  quality: 0.48 }
-  ];
+/**
+ * Ước lượng payload kích thước theo Provider của profile
+ */
+function estimatePayloadForProvider(provider, images, prompt = '') {
+  const normProv = (provider === 'xkiro') ? 'xkiro' : 'google';
+  if (normProv === 'xkiro') {
+    return estimateXKiroPayloadSize(images, prompt);
+  }
+  return estimateGooglePayloadSize(images, prompt);
+}
 
-  for (const step of qualitySteps) {
-    for (const q of images) {
-      await recompressImage(q, step.maxDim, step.quality);
-    }
-    if (estimatePayloadBytes(images) <= targetBytes) {
-      return true;
+// Hàm tương thích ngược
+function estimatePayloadBytes(images) {
+  return estimateGooglePayloadSize(images);
+}
+
+async function fitImagesWithinBudget(images, provider = 'google', prompt = '') {
+  const normProv = (provider === 'xkiro') ? 'xkiro' : 'google';
+  const limits = PAYLOAD_LIMITS[normProv] || PAYLOAD_LIMITS.google;
+  const targetBytes = limits.safeBytes;
+
+  if (estimatePayloadForProvider(normProv, images, prompt) <= targetBytes) return true;
+
+  if (typeof document !== 'undefined' && typeof Image !== 'undefined') {
+    const qualitySteps = [
+      { maxDim: 1650, quality: 0.80 },
+      { maxDim: 1450, quality: 0.72 },
+      { maxDim: 1250, quality: 0.65 },
+      { maxDim: 1050, quality: 0.55 },
+      { maxDim: 900,  quality: 0.48 }
+    ];
+
+    for (const step of qualitySteps) {
+      for (const q of images) {
+        if (typeof recompressImage === 'function') {
+          await recompressImage(q, step.maxDim, step.quality);
+        }
+      }
+      if (estimatePayloadForProvider(normProv, images, prompt) <= targetBytes) {
+        return true;
+      }
     }
   }
+
   return false;
 }
 
 function recompressImage(q, maxDimension, quality) {
   return new Promise((resolve, reject) => {
+    if (typeof Image === 'undefined') {
+      return resolve();
+    }
     const img = new Image();
     img.onload = () => {
       try {
@@ -1707,32 +1921,40 @@ function recompressImage(q, maxDimension, quality) {
   });
 }
 
-async function splitImagesIntoBatches(images) {
+/**
+ * Tách danh sách ảnh theo Provider cụ thể (PHẦN 3 & PHẦN 4):
+ * - profile.provider === "google" -> dùng giới hạn Google (safeBytes 18.5 MB)
+ * - profile.provider === "xkiro" -> dùng giới hạn xKiro (safeBytes 8.5 MB)
+ * - Tối đa 15 ảnh (MAX_IMAGES = 15). Nếu 15 ảnh nhỏ -> tạo 1 batch 15!
+ */
+async function splitImagesForProvider(profile, images, prompt = '') {
+  const provider = (profile && profile.provider === 'xkiro') ? 'xkiro' : 'google';
+  const limits = PAYLOAD_LIMITS[provider] || PAYLOAD_LIMITS.google;
   const maxPerBatch = state.maxImagesPerRequest || 15;
   const batches = [];
   let current = [];
 
   for (const img of images) {
     if (current.length >= maxPerBatch) {
-      await fitImagesWithinBudget(current);
+      await fitImagesWithinBudget(current, provider, prompt);
       batches.push(current);
       current = [];
     }
 
     const testCandidate = [...current, img];
-    const fits = await fitImagesWithinBudget(testCandidate);
+    const fits = await fitImagesWithinBudget(testCandidate, provider, prompt);
 
     if (fits && testCandidate.length <= maxPerBatch) {
       current = testCandidate;
     } else {
       if (current.length > 0) {
-        await fitImagesWithinBudget(current);
+        await fitImagesWithinBudget(current, provider, prompt);
         batches.push(current);
         current = [img];
-        await fitImagesWithinBudget(current);
+        await fitImagesWithinBudget(current, provider, prompt);
       } else {
         current = [img];
-        await fitImagesWithinBudget(current);
+        await fitImagesWithinBudget(current, provider, prompt);
         batches.push(current);
         current = [];
       }
@@ -1740,11 +1962,28 @@ async function splitImagesIntoBatches(images) {
   }
 
   if (current.length > 0) {
-    await fitImagesWithinBudget(current);
+    await fitImagesWithinBudget(current, provider, prompt);
     batches.push(current);
   }
 
+  console.log(`[splitImagesForProvider] Provider: ${provider}, Images: ${images.length}, SafeBytes: ${limits.safeBytes}, Batches: [${batches.map(b => b.length).join(', ')}]`);
   return batches;
+}
+
+function getActiveBatchSplittingProfile() {
+  if (state.mode === 'cross_check') {
+    const p1 = getProfileById(state.solverProfileId);
+    const p2 = getProfileById(state.verifierProfileId);
+    if (p1?.provider === 'xkiro') return p1;
+    if (p2?.provider === 'xkiro') return p2;
+    return p1 || p2;
+  }
+  return getProfileById(state.lookupProfileId);
+}
+
+async function splitImagesIntoBatches(images) {
+  const profile = getActiveBatchSplittingProfile();
+  return await splitImagesForProvider(profile, images);
 }
 
 // ==========================================

@@ -5,3 +5,4 @@ node_modules/
 Thumbs.db
 package.json
 dev-server.js
+test_runner.js
