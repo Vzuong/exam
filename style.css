@@ -1556,6 +1556,25 @@ body.gemini-theme {
   font-size: 0.9rem;
   color: #fff;
 }
+.provider-badge {
+  font-size: 0.68rem;
+  padding: 2px 7px;
+  border-radius: var(--radius-pill);
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.provider-badge.google {
+  background: rgba(66, 133, 244, 0.18);
+  color: #8ab4f8;
+  border: 1px solid rgba(66, 133, 244, 0.35);
+}
+.provider-badge.xkiro {
+  background: rgba(168, 85, 247, 0.2);
+  color: #c084fc;
+  border: 1px solid rgba(168, 85, 247, 0.4);
+}
 .profile-status-badge {
   font-size: 0.7rem;
   padding: 2px 8px;

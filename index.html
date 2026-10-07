@@ -179,6 +179,7 @@
         <div class="banner-profiles-row" id="bannerProfilesRow">
           <span class="banner-profile-chip" id="bannerProfileRequested">Profile yêu cầu: Tài khoản chính</span>
           <span class="banner-profile-chip" id="bannerProfileActual">Profile thực tế: Tài khoản chính</span>
+          <span class="banner-profile-chip" id="bannerProviderActual">Provider: Google Gemini</span>
           <span class="banner-profile-chip" id="bannerModelActual">Model: Gemini 3.8 Flash</span>
         </div>
         <div class="banner-fallback-alert hidden" id="bannerFallbackAlert"></div>
@@ -187,7 +188,7 @@
           <span class="progress-text" id="bannerProgressText">Sẵn sàng</span>
         </div>
         <div class="banner-disclaimer" id="bannerDisclaimer">
-          * Đây là thống kê request của ứng dụng, không phải số quota thực tế do Google xác nhận.
+          * Đây là thống kê request nội bộ của ứng dụng, không phải quota chính thức của nhà cung cấp.
         </div>
       </div>
 
@@ -233,7 +234,7 @@
       <div class="modal-header">
         <div class="modal-title">
           <span class="title-sparkle">✦</span>
-          <h3>Quản Lý Gemini API Profiles</h3>
+          <h3>Quản Lý AI API Profiles (Google &amp; xKiro)</h3>
         </div>
         <button id="btnCloseSettings" class="btn-icon">✕</button>
       </div>
@@ -243,7 +244,7 @@
         <div class="profiles-section-header">
           <div>
             <div class="section-title">Danh Sách Tài Khoản API</div>
-            <div class="section-subtitle">Tự do thêm nhiều tài khoản/project Google khác nhau để đối soát chéo độc lập.</div>
+            <div class="section-subtitle">Hỗ trợ độc lập từng Profile: Google Gemini hoặc xKiro (OpenAI-compatible Vision).</div>
           </div>
           <button type="button" id="btnAddNewProfile" class="btn-sm btn-primary gemini-btn-primary">
             + Thêm Profile
@@ -264,25 +265,33 @@
           <input type="hidden" id="editProfileId" value="">
           
           <div class="form-group">
+            <label for="inputProfileProvider" class="form-label">Nhà cung cấp (Provider):</label>
+            <select id="inputProfileProvider" class="form-select">
+              <option value="google" selected>Google Gemini</option>
+              <option value="xkiro">xKiro (OpenAI-compatible Vision)</option>
+            </select>
+          </div>
+
+          <div class="form-group">
             <label for="inputProfileName" class="form-label">Tên Profile:</label>
-            <input type="text" id="inputProfileName" class="form-input" placeholder="Ví dụ: Tài khoản chính, Tài khoản phụ 1...">
+            <input type="text" id="inputProfileName" class="form-input" placeholder="Ví dụ: Tài khoản chính, Tài khoản xKiro...">
           </div>
 
           <div class="form-group">
             <label for="inputProfileKey" class="form-label">
-              <span>Gemini API Key:</span>
-              <span class="form-help-link"><a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">Lấy API Key ↗</a></span>
+              <span id="labelProfileKey">Gemini API Key:</span>
+              <span class="form-help-link" id="linkProfileKey"><a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">Lấy API Key ↗</a></span>
             </label>
             <div class="input-with-action">
               <input type="password" id="inputProfileKey" class="form-input" placeholder="AIzaSy...">
               <button type="button" id="btnToggleKeyVisibility" class="btn-input-action" title="Hiện/Ẩn Key">👁</button>
             </div>
-            <p class="form-hint">Key chỉ lưu trong trình duyệt của bạn (BYOK) và dùng trực tiếp để gọi Google API.</p>
+            <p class="form-hint" id="hintProfileKey">Key chỉ lưu trong trình duyệt của bạn (BYOK) và dùng trực tiếp để gọi Google API.</p>
           </div>
 
           <div class="form-row">
             <div class="form-group col-6">
-              <label for="inputProfileModel" class="form-label">Model Gemini:</label>
+              <label for="inputProfileModel" class="form-label" id="labelProfileModel">Model Gemini:</label>
               <select id="inputProfileModel" class="form-select">
                 <option value="gemini-3.8-flash" selected>Gemini 3.8 Flash (Mặc định - Khuyên dùng)</option>
                 <option value="gemini-3.7-flash">Gemini 3.7 Flash</option>
@@ -293,7 +302,7 @@
               <input type="text" id="inputCustomModel" class="form-input hidden" style="margin-top: 6px;" placeholder="Tên model (vd: gemini-3.8-flash)">
             </div>
             <div class="form-group col-6">
-              <label for="inputProfileThinking" class="form-label">Mức suy luận (Thinking):</label>
+              <label for="inputProfileThinking" class="form-label" id="labelProfileThinking">Mức suy luận (Thinking):</label>
               <select id="inputProfileThinking" class="form-select">
                 <option value="low">Low — Nhanh hơn</option>
                 <option value="medium">Medium — Cân bằng</option>

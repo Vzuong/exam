@@ -29,6 +29,15 @@ const FALLBACK_MODELS_CHAIN = [
   'gemini-2.5-flash'
 ];
 
+// Danh sách model Vision xKiro dự phòng (khi chưa tải catalog từ GET /v1/models)
+const DEFAULT_XKIRO_VISION_MODELS = [
+  { id: 'qwen/qwen-plus-2025-07-28:free', name: '[FREE] qwen/qwen-plus-2025-07-28:free (Khuyên dùng)', isFree: true, hasReasoning: true },
+  { id: 'qwen/qwen3-vl-plus:free', name: '[FREE] qwen/qwen3-vl-plus:free', isFree: true, hasReasoning: true },
+  { id: 'mistralai/ministral-14b', name: '[FREE] mistralai/ministral-14b', isFree: true, hasReasoning: false },
+  { id: 'google/gemini-3.6-flash', name: 'google/gemini-3.6-flash', isFree: false, hasReasoning: true },
+  { id: 'openai/gpt-6.1-sol', name: 'openai/gpt-6.1-sol', isFree: false, hasReasoning: true }
+];
+
 const state = {
   questions: [],
 
@@ -47,11 +56,18 @@ const state = {
   // Realtime Execution State
   currentProcessStage: 'Sẵn sàng',
 
+  // Cache danh sách model xKiro từ GET https://api.xkiro.com/v1/models
+  cachedXKiroModels: null,
+
   // Request Statistics: Tách riêng Request thành công, Lần thử lỗi và Tổng lần gửi
   requestStats: {
     successRequests: 0,
     failedAttempts: 0,
     totalAttempts: 0,
+    googleSuccess: 0,
+    googleFailed: 0,
+    xkiroSuccess: 0,
+    xkiroFailed: 0,
     lookupPass: 0,
     firstPass: 0,
     secondPass: 0,
@@ -61,6 +77,7 @@ const state = {
     lastStatus: '',
     requestedProfileName: '',
     actualProfileName: '',
+    actualProvider: '', // 'Google Gemini' | 'xKiro'
     actualModelName: '',
     fallbackNotice: ''
   },
@@ -95,6 +112,7 @@ const elements = {
   bannerProgressText: document.getElementById('bannerProgressText'),
   bannerProfileRequested: document.getElementById('bannerProfileRequested'),
   bannerProfileActual: document.getElementById('bannerProfileActual'),
+  bannerProviderActual: document.getElementById('bannerProviderActual'),
   bannerModelActual: document.getElementById('bannerModelActual'),
   bannerFallbackAlert: document.getElementById('bannerFallbackAlert'),
   bannerDisclaimer: document.getElementById('bannerDisclaimer'),
@@ -128,11 +146,17 @@ const elements = {
   profileFormBox: document.getElementById('profileFormBox'),
   profileFormTitle: document.getElementById('profileFormTitle'),
   editProfileId: document.getElementById('editProfileId'),
+  inputProfileProvider: document.getElementById('inputProfileProvider'),
   inputProfileName: document.getElementById('inputProfileName'),
+  labelProfileKey: document.getElementById('labelProfileKey'),
+  linkProfileKey: document.getElementById('linkProfileKey'),
+  hintProfileKey: document.getElementById('hintProfileKey'),
   inputProfileKey: document.getElementById('inputProfileKey'),
   btnToggleKeyVisibility: document.getElementById('btnToggleKeyVisibility'),
+  labelProfileModel: document.getElementById('labelProfileModel'),
   inputProfileModel: document.getElementById('inputProfileModel'),
   inputCustomModel: document.getElementById('inputCustomModel'),
+  labelProfileThinking: document.getElementById('labelProfileThinking'),
   inputProfileThinking: document.getElementById('inputProfileThinking'),
   btnTestThisKey: document.getElementById('btnTestThisKey'),
   btnCancelProfile: document.getElementById('btnCancelProfile'),
@@ -168,9 +192,11 @@ function createDefaultProfiles() {
     {
       id: 'prof_' + Date.now() + '_1',
       name: 'Tài khoản chính',
+      provider: 'google',
       apiKey: '',
       model: 'gemini-3.8-flash',
       thinkingLevel: 'high',
+      reasoningEffort: 'default',
       status: 'untested', // 'ready' | 'rate_limited' | 'error' | 'untested'
       lastChecked: null,
       lastError: null,
@@ -179,9 +205,11 @@ function createDefaultProfiles() {
     {
       id: 'prof_' + (Date.now() + 1) + '_2',
       name: 'Tài khoản phụ 1',
+      provider: 'google',
       apiKey: '',
       model: 'gemini-3.8-flash',
       thinkingLevel: 'high',
+      reasoningEffort: 'default',
       status: 'untested',
       lastChecked: null,
       lastError: null,
@@ -201,6 +229,12 @@ function loadProfilesAndSettings() {
         state.profiles = [];
       }
     }
+
+    // Đảm bảo mọi Profile đều có trường provider và reasoningEffort
+    (state.profiles || []).forEach(p => {
+      if (!p.provider) p.provider = 'google';
+      if (!p.reasoningEffort) p.reasoningEffort = 'default';
+    });
 
     // Migrate from legacy single-key storage if needed
     if (!state.profiles || state.profiles.length === 0) {
@@ -288,10 +322,12 @@ function updateHeaderBadges() {
   if (elements.activeModelBadge) {
     if (state.mode === 'lookup') {
       const prof = getProfileById(state.lookupProfileId);
-      elements.activeModelBadge.textContent = prof ? `${prof.model.replace(/^gemini-/, '')}` : 'Chỉ tra';
+      const provTag = prof?.provider === 'xkiro' ? 'xKiro · ' : '';
+      elements.activeModelBadge.textContent = prof ? `${provTag}${prof.model.replace(/^gemini-/, '')}` : 'Chỉ tra';
     } else {
       const p1 = getProfileById(state.solverProfileId);
-      elements.activeModelBadge.textContent = p1 ? `Chéo • ${p1.model.replace(/^gemini-/, '')}` : 'Kiểm tra chéo';
+      const provTag = p1?.provider === 'xkiro' ? 'xKiro · ' : '';
+      elements.activeModelBadge.textContent = p1 ? `Chéo • ${provTag}${p1.model.replace(/^gemini-/, '')}` : 'Kiểm tra chéo';
     }
   }
 }
@@ -347,6 +383,7 @@ function renderProfilesList() {
         <div class="profile-card-top">
           <div class="profile-name-tag" style="display: flex; align-items: center; gap: 8px;">
             <span>👤 ${escapeHtml(p.name)}</span>
+            ${p.provider === 'xkiro' ? '<span class="provider-badge xkiro">⚡ xKiro</span>' : '<span class="provider-badge google">✨ Google Gemini</span>'}
             ${roleBadge}
           </div>
           <span class="profile-status-badge ${s.cls}">${s.label}</span>
@@ -357,7 +394,7 @@ function renderProfilesList() {
           <span>•</span>
           <span>Model: ${escapeHtml(p.model)}</span>
           <span>•</span>
-          <span>Thinking: ${p.thinkingLevel.toUpperCase()}</span>
+          <span>${p.provider === 'xkiro' ? 'Reasoning: ' + (p.reasoningEffort || 'default').toUpperCase() : 'Thinking: ' + (p.thinkingLevel || 'high').toUpperCase()}</span>
         </div>
 
         ${p.lastError ? `<div class="profile-card-error">⚠ ${escapeHtml(p.lastError)}</div>` : ''}
@@ -390,17 +427,196 @@ function renderProfilesList() {
   });
 }
 
+async function fetchXKiroVisionModels(apiKey = '') {
+  if (state.cachedXKiroModels && state.cachedXKiroModels.length > 0) {
+    return state.cachedXKiroModels;
+  }
+
+  const headers = {};
+  if (apiKey && apiKey.trim()) {
+    headers['Authorization'] = 'Bearer ' + apiKey.trim();
+  }
+
+  const res = await fetch('https://api.xkiro.com/v1/models', { headers }).catch(err => {
+    throw new Error('Không thể kết nối tới catalog xKiro (GET /v1/models). Kiểm tra mạng.');
+  });
+
+  if (!res.ok) {
+    throw new Error(`Lỗi tải catalog xKiro (${res.status}): ${res.statusText}`);
+  }
+
+  const data = await res.json().catch(() => ({}));
+  const list = data.data || [];
+
+  // Lọc nghiêm ngặt:
+  // - modality = chat
+  // - capabilities.vision = true
+  // - loại trừ TTS, image gen, audio, embedding nếu có
+  const visionModels = list.filter(m => {
+    if (m.modality !== 'chat') return false;
+    if (!m.capabilities || !m.capabilities.vision) return false;
+    if (/tts|whisper|dall-e|flux|embed|moderation/i.test(m.id)) return false;
+    return true;
+  }).map(m => ({
+    id: m.id, // Giữ đầy đủ vendor/model, ví dụ openai/gpt-6.1-sol
+    name: m.id,
+    accessTier: m.access_tier || 'paid',
+    isFree: m.access_tier === 'free',
+    hasReasoning: Boolean(m.capabilities?.reasoning),
+    reasoningLevels: m.reasoning_efforts?.levels || []
+  }));
+
+  state.cachedXKiroModels = visionModels;
+  return visionModels;
+}
+
+function getBestXKiroDefaultModel(visionModels) {
+  if (!visionModels || visionModels.length === 0) return 'qwen/qwen-plus-2025-07-28:free';
+  // Ưu tiên:
+  // 1. vision = true && reasoning = true && access_tier = free
+  const p1 = visionModels.find(m => m.isFree && m.hasReasoning);
+  if (p1) return p1.id;
+  // 2. access_tier = free
+  const p2 = visionModels.find(m => m.isFree);
+  if (p2) return p2.id;
+  // 3. reasoning = true
+  const p3 = visionModels.find(m => m.hasReasoning);
+  if (p3) return p3.id;
+  // 4. Model đầu tiên
+  return visionModels[0].id;
+}
+
+async function onProviderChanged(provider, preserveModel = '') {
+  const isXKiro = provider === 'xkiro';
+
+  // Cập nhật nhãn và liên kết API key
+  if (elements.labelProfileKey) {
+    elements.labelProfileKey.textContent = isXKiro ? 'xKiro API Key:' : 'Gemini API Key:';
+  }
+  if (elements.linkProfileKey) {
+    elements.linkProfileKey.innerHTML = isXKiro
+      ? '<a href="https://xkiro.com/dashboard/api/keys" target="_blank" rel="noopener">Lấy API Key ↗</a>'
+      : '<a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">Lấy API Key ↗</a>';
+  }
+  if (elements.inputProfileKey) {
+    elements.inputProfileKey.placeholder = isXKiro ? 'xk-...' : 'AIzaSy...';
+  }
+  if (elements.hintProfileKey) {
+    elements.hintProfileKey.textContent = isXKiro
+      ? 'Key chỉ lưu trong trình duyệt của bạn (BYOK) và dùng trực tiếp để gọi xKiro API (https://api.xkiro.com/v1).'
+      : 'Key chỉ lưu trong trình duyệt của bạn (BYOK) và dùng trực tiếp để gọi Google API.';
+  }
+
+  // Cập nhật nhãn Model và Thinking / Reasoning
+  if (elements.labelProfileModel) {
+    elements.labelProfileModel.textContent = isXKiro ? 'Model xKiro (Vendor/Model):' : 'Model Gemini:';
+  }
+  if (elements.labelProfileThinking) {
+    elements.labelProfileThinking.textContent = isXKiro ? 'Mức suy luận (Reasoning Effort):' : 'Mức suy luận (Thinking):';
+  }
+
+  // Cập nhật mức suy luận (Thinking / Reasoning Effort)
+  if (elements.inputProfileThinking) {
+    if (isXKiro) {
+      elements.inputProfileThinking.innerHTML = `
+        <option value="default" selected>Mặc định của model</option>
+        <option value="none">Tắt suy luận (None)</option>
+        <option value="low">Low</option>
+        <option value="medium">Medium</option>
+        <option value="high">High</option>
+        <option value="xhigh">X-High</option>
+        <option value="max">Max</option>
+      `;
+    } else {
+      elements.inputProfileThinking.innerHTML = `
+        <option value="low">Low — Nhanh hơn</option>
+        <option value="medium">Medium — Cân bằng</option>
+        <option value="high" selected>High — Ưu tiên chính xác</option>
+      `;
+    }
+  }
+
+  // Cập nhật danh sách model theo Provider
+  if (elements.inputProfileModel) {
+    if (!isXKiro) {
+      // Provider Google Gemini
+      elements.inputProfileModel.innerHTML = DEFAULT_MODELS.map(m =>
+        `<option value="${m.id}">${m.name}</option>`
+      ).join('') + '<option value="custom">Tự nhập model khác...</option>';
+
+      if (preserveModel && DEFAULT_MODELS.some(m => m.id === preserveModel)) {
+        elements.inputProfileModel.value = preserveModel;
+        elements.inputCustomModel.classList.add('hidden');
+      } else if (preserveModel) {
+        elements.inputProfileModel.value = 'custom';
+        elements.inputCustomModel.value = preserveModel;
+        elements.inputCustomModel.classList.remove('hidden');
+      } else {
+        elements.inputProfileModel.value = 'gemini-3.8-flash';
+        elements.inputCustomModel.classList.add('hidden');
+      }
+    } else {
+      // Provider xKiro
+      elements.inputProfileModel.innerHTML = '<option value="">Đang tải danh sách vision model xKiro...</option>';
+      let visionModels = [];
+      try {
+        visionModels = await fetchXKiroVisionModels();
+      } catch (err) {
+        console.warn('Không tải được catalog xKiro trực tiếp, dùng danh sách dự phòng:', err);
+        visionModels = DEFAULT_XKIRO_VISION_MODELS;
+      }
+
+      const freeModels = visionModels.filter(m => m.isFree || m.id.includes(':free') || m.id.startsWith('mistralai/'));
+      const paidModels = visionModels.filter(m => !freeModels.some(f => f.id === m.id));
+
+      let optHtml = '';
+      if (freeModels.length > 0) {
+        optHtml += '<optgroup label="── Model Miễn Phí (Free Tier) ──">';
+        optHtml += freeModels.map(m => {
+          const rIcon = m.hasReasoning ? ' 🧠' : '';
+          return `<option value="${m.id}">[FREE] ${m.id}${rIcon}</option>`;
+        }).join('');
+        optHtml += '</optgroup>';
+      }
+      if (paidModels.length > 0) {
+        optHtml += '<optgroup label="── Model Trả Phí (Standard / Paid) ──">';
+        optHtml += paidModels.map(m => {
+          const rIcon = m.hasReasoning ? ' 🧠' : '';
+          return `<option value="${m.id}">${m.id}${rIcon}</option>`;
+        }).join('');
+        optHtml += '</optgroup>';
+      }
+      optHtml += '<option value="custom">Tự nhập model xKiro khác...</option>';
+      elements.inputProfileModel.innerHTML = optHtml;
+
+      const allIds = visionModels.map(m => m.id);
+      if (preserveModel && allIds.includes(preserveModel)) {
+        elements.inputProfileModel.value = preserveModel;
+        elements.inputCustomModel.classList.add('hidden');
+      } else if (preserveModel) {
+        elements.inputProfileModel.value = 'custom';
+        elements.inputCustomModel.value = preserveModel;
+        elements.inputCustomModel.classList.remove('hidden');
+      } else {
+        const bestDefault = getBestXKiroDefaultModel(visionModels);
+        elements.inputProfileModel.value = bestDefault;
+        elements.inputCustomModel.classList.add('hidden');
+      }
+    }
+  }
+}
+
 function openAddProfileForm() {
   elements.editProfileId.value = '';
   elements.profileFormTitle.textContent = 'Thêm API Profile Mới';
+  if (elements.inputProfileProvider) elements.inputProfileProvider.value = 'google';
   elements.inputProfileName.value = `Tài khoản phụ ${state.profiles.length}`;
   elements.inputProfileKey.value = '';
-  elements.inputProfileModel.value = 'gemini-3.8-flash';
   elements.inputCustomModel.value = '';
   elements.inputCustomModel.classList.add('hidden');
-  elements.inputProfileThinking.value = 'high';
   elements.testKeyFeedback.className = 'test-feedback hidden';
   elements.testKeyFeedback.textContent = '';
+  onProviderChanged('google', 'gemini-3.8-flash');
   elements.profileFormBox.classList.remove('hidden');
   elements.inputProfileKey.focus();
 }
@@ -411,22 +627,21 @@ function openEditProfileForm(profileId) {
 
   elements.editProfileId.value = p.id;
   elements.profileFormTitle.textContent = `Chỉnh Sửa: ${p.name}`;
+  const provider = p.provider || 'google';
+  if (elements.inputProfileProvider) elements.inputProfileProvider.value = provider;
   elements.inputProfileName.value = p.name;
   elements.inputProfileKey.value = p.apiKey;
-
-  const modelExists = Array.from(elements.inputProfileModel.options).some(opt => opt.value === p.model);
-  if (modelExists) {
-    elements.inputProfileModel.value = p.model;
-    elements.inputCustomModel.classList.add('hidden');
-  } else {
-    elements.inputProfileModel.value = 'custom';
-    elements.inputCustomModel.value = p.model;
-    elements.inputCustomModel.classList.remove('hidden');
-  }
-
-  elements.inputProfileThinking.value = p.thinkingLevel || 'high';
   elements.testKeyFeedback.className = 'test-feedback hidden';
   elements.testKeyFeedback.textContent = '';
+
+  onProviderChanged(provider, p.model).then(() => {
+    if (provider === 'xkiro') {
+      elements.inputProfileThinking.value = p.reasoningEffort || 'default';
+    } else {
+      elements.inputProfileThinking.value = p.thinkingLevel || 'high';
+    }
+  });
+
   elements.profileFormBox.classList.remove('hidden');
 }
 
@@ -435,33 +650,41 @@ function closeProfileForm() {
 }
 
 function saveProfileFormData() {
-  const name = (elements.inputProfileName.value || '').trim() || 'API Profile';
+  const provider = elements.inputProfileProvider ? elements.inputProfileProvider.value : 'google';
+  const name = (elements.inputProfileName.value || '').trim() || (provider === 'xkiro' ? 'Tài khoản xKiro' : 'Tài khoản Google');
   const apiKey = (elements.inputProfileKey.value || '').trim();
   const selectedModel = elements.inputProfileModel.value === 'custom'
-    ? (elements.inputCustomModel.value || '').trim() || 'gemini-3.8-flash'
+    ? (elements.inputCustomModel.value || '').trim() || (provider === 'xkiro' ? 'qwen/qwen-plus-2025-07-28:free' : 'gemini-3.8-flash')
     : elements.inputProfileModel.value;
-  const thinking = elements.inputProfileThinking.value || 'high';
+  const thinkingVal = elements.inputProfileThinking.value || 'high';
   const editId = elements.editProfileId.value;
 
   if (editId) {
-    // Update existing
     const p = getProfileById(editId);
     if (p) {
+      p.provider = provider;
       p.name = name;
       p.apiKey = apiKey;
       p.model = selectedModel;
-      p.thinkingLevel = thinking;
+      if (provider === 'xkiro') {
+        p.reasoningEffort = thinkingVal;
+        p.thinkingLevel = 'high';
+      } else {
+        p.thinkingLevel = thinkingVal;
+        p.reasoningEffort = 'default';
+      }
       p.status = 'untested';
       p.lastError = null;
     }
   } else {
-    // Create new
     const newProfile = {
       id: 'prof_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
+      provider,
       name,
       apiKey,
       model: selectedModel,
-      thinkingLevel: thinking,
+      thinkingLevel: provider === 'google' ? thinkingVal : 'high',
+      reasoningEffort: provider === 'xkiro' ? thinkingVal : 'default',
       status: 'untested',
       lastChecked: null,
       lastError: null,
@@ -472,7 +695,7 @@ function saveProfileFormData() {
 
   saveProfiles();
   closeProfileForm();
-  showToast(`Đã lưu profile "${name}"!`, 'success');
+  showToast(`Đã lưu profile "${name}" (${provider === 'xkiro' ? 'xKiro' : 'Google'})!`, 'success');
 }
 
 function deleteProfile(id) {
@@ -497,35 +720,82 @@ function deleteProfile(id) {
 // ==========================================
 // 4. Test API Key & Fetch Live Models
 // ==========================================
-async function testApiKeyCall(apiKey) {
+async function testGoogleApiKeyCall(apiKey) {
   if (!apiKey) {
-    throw new Error('Vui lòng nhập API key trước khi kiểm tra.');
+    throw new Error('Vui lòng nhập API key Gemini trước khi kiểm tra.');
   }
-
-  // Fetch available models from Google Generative Language API
   const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`;
-  const resp = await fetch(url).catch(err => {
+  const resp = await fetch(url).catch(() => {
     throw new Error('Không thể kết nối tới Google Generative Language API. Kiểm tra mạng.');
   });
-
   if (resp.status === 429) {
-    throw new Error('API này đang chạm giới hạn sử dụng (429).');
+    throw new Error('API Google này đang chạm giới hạn sử dụng (429).');
   }
   if (resp.status === 401 || resp.status === 403) {
-    throw new Error('API key này không hoạt động hoặc không có quyền truy cập model đã chọn (401/403).');
+    throw new Error('API key Google không hoạt động hoặc không có quyền truy cập (401/403).');
   }
   if (!resp.ok) {
     const errData = await resp.json().catch(() => ({}));
-    throw new Error(errData.error?.message || `Lỗi API (${resp.status}): ${resp.statusText}`);
+    throw new Error(errData.error?.message || `Lỗi API Google (${resp.status}): ${resp.statusText}`);
   }
-
   const data = await resp.json();
   const models = (data.models || [])
     .filter(m => m.supportedGenerationMethods?.includes('generateContent'))
     .map(m => m.name.replace(/^models\//, ''))
     .filter(name => /gemini/i.test(name) && !/2\.0|1\.5/i.test(name));
-
   return models;
+}
+
+async function testXKiroApiKeyCall(apiKey, selectedModel = '') {
+  if (!apiKey) {
+    throw new Error('Vui lòng nhập API key xKiro trước khi kiểm tra.');
+  }
+
+  // 1. Kiểm tra catalog và vision models
+  const visionModels = await fetchXKiroVisionModels(apiKey);
+
+  // 2. Gửi probe request nhỏ tới POST /v1/chat/completions để xác nhận key hợp lệ và model hoạt động
+  const probeModel = (selectedModel && selectedModel !== 'custom') ? selectedModel : getBestXKiroDefaultModel(visionModels);
+  const probeResp = await fetch('https://api.xkiro.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + apiKey.trim()
+    },
+    body: JSON.stringify({
+      model: probeModel,
+      messages: [{ role: 'user', content: '1+1=' }],
+      max_tokens: 3
+    })
+  }).catch(() => {
+    throw new Error('Không thể kết nối tới xKiro endpoint (/v1/chat/completions). Kiểm tra mạng.');
+  });
+
+  if (probeResp.status === 401) {
+    throw new Error('API key xKiro không hợp lệ hoặc đã bị vô hiệu hóa (401).');
+  }
+  if (probeResp.status === 403) {
+    throw new Error('Tài khoản xKiro không có quyền truy cập model đã chọn (403).');
+  }
+  if (probeResp.status === 429) {
+    throw new Error('xKiro đang chạm giới hạn sử dụng hoặc hết quota (429).');
+  }
+  if (probeResp.status >= 500) {
+    throw new Error(`Server xKiro tạm thời unavailable (${probeResp.status}).`);
+  }
+  if (!probeResp.ok) {
+    const errData = await probeResp.json().catch(() => ({}));
+    throw new Error(errData.error?.message || `Lỗi xKiro API (${probeResp.status}): ${probeResp.statusText}`);
+  }
+
+  return visionModels.map(m => m.id);
+}
+
+async function testApiKeyCall(apiKey, provider = 'google', selectedModel = '') {
+  if (provider === 'xkiro') {
+    return await testXKiroApiKeyCall(apiKey, selectedModel);
+  }
+  return await testGoogleApiKeyCall(apiKey);
 }
 
 async function runProfileTest(profileId) {
@@ -537,19 +807,20 @@ async function runProfileTest(profileId) {
     return;
   }
 
-  showToast(`Đang kiểm tra kết nối cho "${p.name}"...`, 'info');
+  const provName = p.provider === 'xkiro' ? 'xKiro' : 'Google';
+  showToast(`Đang kiểm tra kết nối cho "${p.name}" (${provName})...`, 'info');
   try {
-    const models = await testApiKeyCall(p.apiKey);
+    const models = await testApiKeyCall(p.apiKey, p.provider || 'google', p.model);
     p.status = 'ready';
     p.lastChecked = new Date().toISOString();
     p.lastError = null;
     p.availableModels = models;
     saveProfiles();
-    showToast(`✓ API "${p.name}" hoạt động tốt! Tìm thấy ${models.length} model.`, 'success');
+    showToast(`✓ API "${p.name}" (${provName}) hoạt động tốt! (${models.length} vision models)`, 'success');
   } catch (err) {
     if (/429|chạm giới hạn/i.test(err.message)) {
       p.status = 'rate_limited';
-      p.lastError = 'API này đang chạm giới hạn sử dụng.';
+      p.lastError = 'API này đang chạm giới hạn sử dụng (429).';
     } else {
       p.status = 'error';
       p.lastError = err.message || 'API key không hoạt động.';
@@ -561,31 +832,21 @@ async function runProfileTest(profileId) {
 }
 
 async function testFormKey() {
+  const provider = elements.inputProfileProvider ? elements.inputProfileProvider.value : 'google';
   const apiKey = (elements.inputProfileKey.value || '').trim();
+  const selectedModel = elements.inputProfileModel.value === 'custom'
+    ? (elements.inputCustomModel.value || '').trim()
+    : elements.inputProfileModel.value;
+
   const feedback = elements.testKeyFeedback;
   feedback.className = 'test-feedback';
-  feedback.textContent = 'Đang kiểm tra kết nối API...';
+  feedback.textContent = `Đang kiểm tra kết nối ${provider === 'xkiro' ? 'xKiro' : 'Google'} API...`;
   feedback.classList.remove('hidden');
 
   try {
-    const models = await testApiKeyCall(apiKey);
+    const models = await testApiKeyCall(apiKey, provider, selectedModel);
     feedback.className = 'test-feedback success';
-    feedback.textContent = `✓ API Key hợp lệ! Tìm thấy ${models.length} models khả dụng từ Google.`;
-
-    // Populate model dropdown with detected models if available
-    if (models.length > 0) {
-      const currentSelected = elements.inputProfileModel.value;
-      const combined = Array.from(new Set([...DEFAULT_MODELS.map(m => m.id), ...models]));
-      elements.inputProfileModel.innerHTML = combined.map(mId => {
-        return `<option value="${mId}">${mId}</option>`;
-      }).join('') + '<option value="custom">Tự nhập model khác...</option>';
-
-      if (combined.includes(currentSelected)) {
-        elements.inputProfileModel.value = currentSelected;
-      } else if (models.includes('gemini-3.8-flash')) {
-        elements.inputProfileModel.value = 'gemini-3.8-flash';
-      }
-    }
+    feedback.textContent = `✓ API Key hợp lệ! Tìm thấy ${models.length} models khả dụng từ ${provider === 'xkiro' ? 'xKiro' : 'Google'}.`;
   } catch (err) {
     feedback.className = 'test-feedback error';
     feedback.textContent = `✕ ${err.message}`;
@@ -621,6 +882,10 @@ function updateResultBanner() {
     const actName = state.requestStats.actualProfileName || state.requestStats.requestedProfileName || 'Chưa chạy';
     elements.bannerProfileActual.textContent = `Profile thực tế: ${actName}`;
   }
+  if (elements.bannerProviderActual) {
+    const actProv = state.requestStats.actualProvider || 'Google Gemini';
+    elements.bannerProviderActual.textContent = `Provider: ${actProv}`;
+  }
   if (elements.bannerModelActual) {
     const actModel = state.requestStats.actualModelName || 'gemini-3.8-flash';
     elements.bannerModelActual.textContent = `Model: ${actModel}`;
@@ -648,8 +913,17 @@ function updateRequestStatsDisplay() {
   }
   if (r.singleRechecks) breakdown += ` • Câu lẻ: ${r.singleRechecks}`;
 
-  // Thống kê tách rõ 2 chỉ số: Request thành công & Lần thử lỗi + Tổng lần gửi (PHẦN 9, 10)
-  const summary = `Request thành công: ${r.successRequests} • Lần thử lỗi: ${r.failedAttempts} • Tổng lần gửi: ${r.totalAttempts}${breakdown ? ` (${breakdown})` : ''}`;
+  // Thống kê chi tiết tách rõ: Request thành công, Lần thử lỗi, Tổng lần gửi và breakdown theo Provider
+  let provBreakdown = [];
+  if (r.googleSuccess || r.googleFailed) {
+    provBreakdown.push(`Google: ${r.googleSuccess}✓/${r.googleFailed}✕`);
+  }
+  if (r.xkiroSuccess || r.xkiroFailed) {
+    provBreakdown.push(`xKiro: ${r.xkiroSuccess}✓/${r.xkiroFailed}✕`);
+  }
+  const provStr = provBreakdown.length ? ` (${provBreakdown.join(' • ')})` : '';
+
+  const summary = `Request thành công: ${r.successRequests} • Lần thử lỗi: ${r.failedAttempts} • Tổng lần gửi: ${r.totalAttempts}${provStr}${breakdown ? ` [${breakdown}]` : ''}`;
   if (elements.bannerRequestStats) elements.bannerRequestStats.textContent = summary;
 }
 
@@ -658,6 +932,10 @@ function resetRequestStats() {
     successRequests: 0,
     failedAttempts: 0,
     totalAttempts: 0,
+    googleSuccess: 0,
+    googleFailed: 0,
+    xkiroSuccess: 0,
+    xkiroFailed: 0,
     lookupPass: 0,
     firstPass: 0,
     secondPass: 0,
@@ -667,6 +945,7 @@ function resetRequestStats() {
     lastStatus: '',
     requestedProfileName: '',
     actualProfileName: '',
+    actualProvider: '',
     actualModelName: '',
     fallbackNotice: ''
   };
@@ -877,12 +1156,13 @@ async function executeSingleGeminiHttp(profile, modelToUse, images, prompt) {
     });
   } catch (netErr) {
     state.requestStats.failedAttempts += 1;
+    state.requestStats.googleFailed += 1;
     updateRequestStatsDisplay();
     return {
       ok: false,
       status: 0,
       isTransient: true,
-      errorMsg: netErr.message || 'Lỗi kết nối mạng (Network Error)'
+      errorMsg: netErr.message || 'Lỗi kết nối mạng tới Google (Network Error)'
     };
   }
 
@@ -890,38 +1170,39 @@ async function executeSingleGeminiHttp(profile, modelToUse, images, prompt) {
 
   if (!response.ok) {
     state.requestStats.failedAttempts += 1;
+    state.requestStats.googleFailed += 1;
     updateRequestStatsDisplay();
-    const apiMsg = data.error?.message || response.statusText || 'Lỗi không xác định';
+    const apiMsg = data.error?.message || response.statusText || 'Lỗi Google không xác định';
 
     // 413 = Payload Too Large
     if (response.status === 413) {
       throw new Error('PAYLOAD_413_TOO_LARGE');
     }
 
-    // 400 = Invalid request (sai prompt/payload) -> Báo lỗi ngay, không fallback vô ích (PHẦN 7)
+    // 400 = Invalid request
     if (response.status === 400) {
       profile.status = 'error';
+      profile.lastError = `Yêu cầu không hợp lệ (400): ${apiMsg}`;
       saveProfiles();
-      throw new Error(`Yêu cầu không hợp lệ cho "${profile.name}" (400): ${apiMsg}`);
+      throw new Error(`Yêu cầu Google không hợp lệ cho "${profile.name}" (400): ${apiMsg}`);
     }
 
-    // 401 / 403 = Invalid key hoặc không có quyền -> Báo lỗi, không retry vòng lặp (PHẦN 7)
+    // 401 / 403 = Invalid key
     if (response.status === 401 || response.status === 403) {
       profile.status = 'error';
-      profile.lastError = 'API key không hoạt động hoặc không có quyền truy cập.';
+      profile.lastError = 'API key Google không hoạt động hoặc không có quyền truy cập.';
       saveProfiles();
-      throw new Error(`API key của "${profile.name}" không hợp lệ hoặc thiếu quyền (${response.status}): ${apiMsg}`);
+      throw new Error(`API key Google của "${profile.name}" không hợp lệ (${response.status}): ${apiMsg}`);
     }
 
-    // 429 = Rate limit / Quota -> Báo rate limit, KHÔNG retry vô hạn, KHÔNG chạy fallback 503 (PHẦN 7)
+    // 429 = Rate limit
     if (response.status === 429) {
       profile.status = 'rate_limited';
-      profile.lastError = 'API này đang chạm giới hạn sử dụng (429).';
+      profile.lastError = 'API Google này đang chạm giới hạn sử dụng (429).';
       saveProfiles();
-      throw new Error(`API "${profile.name}" đang chạm giới hạn sử dụng (429).`);
+      throw new Error(`API Google "${profile.name}" đang chạm giới hạn sử dụng (429).`);
     }
 
-    // Các mã lỗi tạm thời có thể fallback: 503 (quá tải), 502 (bad gateway), 504 (gateway timeout), 500
     const isTransient = [500, 502, 503, 504].includes(response.status) || /high demand|temporarily unavailable|overloaded/i.test(apiMsg);
     return {
       ok: false,
@@ -934,6 +1215,7 @@ async function executeSingleGeminiHttp(profile, modelToUse, images, prompt) {
   const rawText = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
   if (!rawText.trim()) {
     state.requestStats.failedAttempts += 1;
+    state.requestStats.googleFailed += 1;
     updateRequestStatsDisplay();
     return {
       ok: false,
@@ -943,8 +1225,9 @@ async function executeSingleGeminiHttp(profile, modelToUse, images, prompt) {
     };
   }
 
-  // HTTP 200 OK Thành công!
+  // 200 OK Thành công!
   state.requestStats.successRequests += 1;
+  state.requestStats.googleSuccess += 1;
   profile.status = 'ready';
   profile.lastError = null;
   return {
@@ -954,29 +1237,199 @@ async function executeSingleGeminiHttp(profile, modelToUse, images, prompt) {
 }
 
 /**
- * Điều phối gọi API theo cơ chế Fallback thông minh:
- * 1. ƯU TIÊN PROFILE TRƯỚC: Thử Profile yêu cầu (model của profile đó, tối đa 1 retry với backoff 1.5–3s).
- *    Nếu 503 -> Chuyển sang Profile B (dùng Profile B.apiKey và model của B, retry tối đa 1 lần).
- *    Nếu 503 -> Chuyển tiếp Profile C...
- * 2. CHỈ KHI TẤT CẢ PROFILE ĐỀU 503: Mới fallback model theo đúng thứ tự:
- *    gemini-3.7-flash ➔ gemini-3.6-flash ➔ gemini-2.5-flash
- *    (Tuyệt đối KHÔNG có c�c model 2.0 hay 1.5 cu).
- * 3. Không thay đổi Profile người dùng đã chọn trong cài đặt hay dropdown.
+ * Gửi HTTP request tới xKiro API (https://api.xkiro.com/v1/chat/completions)
+ * Tuân thủ chuẩn OpenAI-compatible Chat Completions có hỗ trợ Vision qua mảng Content
  */
-async function callGeminiApiForProfile(requestedProfile, images, prompt, kind) {
+async function executeSingleXKiroHttp(profile, modelToUse, images, prompt) {
+  state.requestStats.totalAttempts += 1;
+  updateRequestStatsDisplay();
+
+  const url = 'https://api.xkiro.com/v1/chat/completions';
+
+  // Định dạng Content Array chuẩn OpenAI-compatible vision:
+  // Text yêu cầu + từng ảnh với format data:image/jpeg;base64,...
+  const content = [
+    { type: 'text', text: prompt + '\n\n' }
+  ];
+
+  images.forEach((q, idx) => {
+    content.push({
+      type: 'text',
+      text: `=== ẢNH CÂU HỎI ${idx + 1} / ${images.length} (Tên: ${q.name || `cau_${idx + 1}.jpg`}) ===\n`
+    });
+    content.push({
+      type: 'image_url',
+      image_url: {
+        url: `data:${q.mimeType || 'image/jpeg'};base64,${q.base64}`
+      }
+    });
+  });
+
+  const payload = {
+    model: modelToUse, // Giữ đầy đủ vendor/model prefix, ví dụ openai/gpt-6.1-sol
+    messages: [
+      {
+        role: 'user',
+        content
+      }
+    ],
+    response_format: { type: 'json_object' }
+  };
+
+  // Cấu hình reasoning effort cho xKiro nếu profile chọn
+  if (profile.reasoningEffort && profile.reasoningEffort !== 'default') {
+    payload.reasoning_effort = profile.reasoningEffort;
+  }
+  // Theo tài liệu xKiro: không gửi temperature khi reasoning active
+  if (!payload.reasoning_effort || payload.reasoning_effort === 'none') {
+    payload.temperature = 0.2;
+  }
+
+  let response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + profile.apiKey.trim()
+      },
+      body: JSON.stringify(payload)
+    });
+  } catch (netErr) {
+    state.requestStats.failedAttempts += 1;
+    state.requestStats.xkiroFailed += 1;
+    updateRequestStatsDisplay();
+    return {
+      ok: false,
+      status: 0,
+      isTransient: true,
+      errorMsg: netErr.message || 'Lỗi kết nối mạng tới xKiro (Network Error)'
+    };
+  }
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    state.requestStats.failedAttempts += 1;
+    state.requestStats.xkiroFailed += 1;
+    updateRequestStatsDisplay();
+    const apiMsg = data.error?.message || response.statusText || 'Lỗi xKiro không xác định';
+
+    // 413 = Payload Too Large
+    if (response.status === 413) {
+      throw new Error('PAYLOAD_413_TOO_LARGE');
+    }
+
+    // 400 = Invalid request
+    if (response.status === 400) {
+      profile.status = 'error';
+      profile.lastError = `Yêu cầu không hợp lệ (400): ${apiMsg}`;
+      saveProfiles();
+      throw new Error(`Yêu cầu xKiro không hợp lệ cho "${profile.name}" (400): ${apiMsg}`);
+    }
+
+    // 401 = Invalid Key / Disabled
+    if (response.status === 401) {
+      profile.status = 'error';
+      profile.lastError = 'API key xKiro không hợp lệ hoặc đã bị vô hiệu hóa (401).';
+      saveProfiles();
+      throw new Error(`API key xKiro của "${profile.name}" không hợp lệ (401): ${apiMsg}`);
+    }
+
+    // 403 = Forbidden
+    if (response.status === 403) {
+      profile.status = 'error';
+      profile.lastError = 'Tài khoản xKiro không có quyền truy cập model đã chọn (403).';
+      saveProfiles();
+      throw new Error(`Tài khoản xKiro "${profile.name}" không có quyền truy cập (403): ${apiMsg}`);
+    }
+
+    // 429 = Rate limit
+    if (response.status === 429) {
+      profile.status = 'rate_limited';
+      profile.lastError = 'xKiro đang chạm giới hạn sử dụng hoặc hết quota (429).';
+      saveProfiles();
+      throw new Error(`API xKiro "${profile.name}" chạm giới hạn sử dụng (429).`);
+    }
+
+    const isTransient = [500, 502, 503, 504].includes(response.status) || /temporarily unavailable|overloaded|gateway timeout/i.test(apiMsg);
+    return {
+      ok: false,
+      status: response.status,
+      isTransient,
+      errorMsg: `xKiro API (${response.status}): ${apiMsg}`
+    };
+  }
+
+  const rawText = data.choices?.[0]?.message?.content || '';
+  if (!rawText.trim()) {
+    state.requestStats.failedAttempts += 1;
+    state.requestStats.xkiroFailed += 1;
+    updateRequestStatsDisplay();
+    return {
+      ok: false,
+      status: response.status,
+      isTransient: true,
+      errorMsg: `xKiro (${profile.name}) không trả về nội dung kết quả.`
+    };
+  }
+
+  // 200 OK Thành công!
+  state.requestStats.successRequests += 1;
+  state.requestStats.xkiroSuccess += 1;
+  profile.status = 'ready';
+  profile.lastError = null;
+  return {
+    ok: true,
+    data: rawText.trim()
+  };
+}
+
+/**
+ * Lớp Adapter gọi AI Profile chung (Google Gemini hoặc xKiro)
+ */
+async function executeSingleAIHttp(profile, modelToUse, images, prompt) {
+  if (profile.provider === 'xkiro') {
+    return await executeSingleXKiroHttp(profile, modelToUse, images, prompt);
+  }
+  return await executeSingleGeminiHttp(profile, modelToUse, images, prompt);
+}
+
+/**
+ * Chuẩn hóa response thô từ provider về chuỗi JSON text thuần túy
+ */
+function normalizeAIResponse(provider, rawResponse) {
+  if (typeof rawResponse === 'string') return rawResponse.trim();
+  if (!rawResponse) return '';
+  if (provider === 'xkiro') {
+    return rawResponse.choices?.[0]?.message?.content || '';
+  }
+  return rawResponse.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
+}
+
+/**
+ * Điều phối gọi AI Profile theo cơ chế Fallback thông minh:
+ * 1. ƯU TIÊN PROFILE TRƯỚC (Hỗ trợ đa Provider: Google và xKiro):
+ *    - Thử Profile yêu cầu (model của profile đó, tối đa 1 retry với backoff 1.5–2.5s).
+ *    - Nếu lỗi tạm thời (503, network...) -> Chuyển sang Profile B (dùng đúng Provider, API key và model của B).
+ *    - Có thể chuyển đổi mượt mà giữa Google <-> xKiro.
+ * 2. CHỈ KHI TẤT CẢ PROFILE ĐỀU QUÁ TẢI: Mới fallback model theo cấu hình tương ứng với từng provider.
+ */
+async function callAIProfile(requestedProfile, images, prompt, kind) {
   if (!requestedProfile || !requestedProfile.apiKey) {
     const pName = requestedProfile?.name || 'Tài khoản đã chọn';
     throw new Error(`Profile "${pName}" chưa có API key. Vui lòng bấm biểu tượng Cài đặt để nhập key.`);
   }
 
-  // Khởi tạo thông tin hiển thị Profile ban đầu
+  const reqProvName = requestedProfile.provider === 'xkiro' ? 'xKiro' : 'Google Gemini';
   state.requestStats.requestedProfileName = requestedProfile.name;
   state.requestStats.actualProfileName = requestedProfile.name;
-  state.requestStats.actualModelName = requestedProfile.model || 'gemini-3.8-flash';
+  state.requestStats.actualProvider = reqProvName;
+  state.requestStats.actualModelName = requestedProfile.model;
   state.requestStats.fallbackNotice = '';
   updateResultBanner();
 
-  // Tạo danh sách Candidate Profiles hợp lệ (Bắt đầu từ requestedProfile)
+  // Tạo danh sách Candidate Profiles hợp lệ
   const candidateProfiles = [requestedProfile];
   (state.profiles || []).forEach(p => {
     if (p.id !== requestedProfile.id && p.apiKey && p.apiKey.trim() && p.status !== 'rate_limited') {
@@ -991,13 +1444,15 @@ async function callGeminiApiForProfile(requestedProfile, images, prompt, kind) {
   // ========================================================
   for (let i = 0; i < candidateProfiles.length; i++) {
     const activeProf = candidateProfiles[i];
-    const activeModel = activeProf.model || 'gemini-3.8-flash';
+    const activeModel = activeProf.model;
+    const activeProvName = activeProf.provider === 'xkiro' ? 'xKiro' : 'Google Gemini';
 
     state.requestStats.actualProfileName = activeProf.name;
+    state.requestStats.actualProvider = activeProvName;
     state.requestStats.actualModelName = activeModel;
 
     if (i > 0) {
-      const switchNotice = `⚠ Profile "${requestedProfile.name}" quá tải (503) ➔ Đã chuyển sang "${activeProf.name}" · ${activeModel}`;
+      const switchNotice = `⚠ Profile "${requestedProfile.name}" quá tải ➔ Đã chuyển sang "${activeProf.name}" (${activeProvName} · ${activeModel})`;
       state.requestStats.fallbackNotice = switchNotice;
       state.currentProcessStage = switchNotice;
       updateResultBanner();
@@ -1005,12 +1460,11 @@ async function callGeminiApiForProfile(requestedProfile, images, prompt, kind) {
     }
 
     // Thử gọi lần 1 trên Profile này
-    let res = await executeSingleGeminiHttp(activeProf, activeModel, images, prompt);
+    let res = await executeSingleAIHttp(activeProf, activeModel, images, prompt);
 
     if (res.ok) {
-      // Thành công!
       if (i > 0) {
-        state.requestStats.fallbackNotice = `✓ Hoàn tất bằng ${activeProf.name} · ${activeModel}`;
+        state.requestStats.fallbackNotice = `✓ Hoàn tất bằng ${activeProf.name} (${activeProvName} · ${activeModel})`;
       }
       registerSuccessByKind(kind);
       updateRequestStatsDisplay();
@@ -1019,16 +1473,16 @@ async function callGeminiApiForProfile(requestedProfile, images, prompt, kind) {
 
     lastTransientError = res.errorMsg;
 
-    // Nếu lỗi là transient (503, 502, 504, network...), cho phép retry tối đa 1 lần trên cùng Profile này (PHẦN 8)
+    // Retry tối đa 1 lần nếu là lỗi tạm thời (503, 502, 504, timeout...)
     if (res.isTransient) {
-      state.currentProcessStage = `${activeProf.name} (${activeModel}) quá tải (503) ➔ Đang thử lại (Retry 1/1)...`;
+      state.currentProcessStage = `${activeProf.name} (${activeModel}) quá tải ➔ Đang thử lại (Retry 1/1)...`;
       updateResultBanner();
       await delay(1500 + Math.floor(Math.random() * 500));
 
-      res = await executeSingleGeminiHttp(activeProf, activeModel, images, prompt);
+      res = await executeSingleAIHttp(activeProf, activeModel, images, prompt);
       if (res.ok) {
         if (i > 0) {
-          state.requestStats.fallbackNotice = `✓ Hoàn tất bằng ${activeProf.name} · ${activeModel}`;
+          state.requestStats.fallbackNotice = `✓ Hoàn tất bằng ${activeProf.name} (${activeProvName} · ${activeModel})`;
         }
         registerSuccessByKind(kind);
         updateRequestStatsDisplay();
@@ -1036,60 +1490,91 @@ async function callGeminiApiForProfile(requestedProfile, images, prompt, kind) {
       }
       lastTransientError = res.errorMsg;
     }
-
-    // Thử cả 2 lần (lần đầu + 1 retry) trên Profile này đều thất bại -> chuyển sang Profile tiếp theo trong candidateProfiles
   }
 
   // ========================================================
-  // GIAI ĐOẠN 2: MODEL FALLBACK (Chỉ khi tất cả các Profile đều quá tải 503)
-  // Thứ tự fallback bắt buộc: gemini-3.7-flash ➔ gemini-3.6-flash ➔ gemini-2.5-flash
+  // GIAI ĐOẠN 2: MODEL FALLBACK (Khi tất cả Profile ứng viên đều quá tải)
   // ========================================================
-  const fallbackModelChain = FALLBACK_MODELS_CHAIN;
-  // Dùng profile ban đầu (hoặc profile đầu tiên hợp lệ) với API key thật của profile đó
-  const fallbackProfile = candidateProfiles[0] || requestedProfile;
+  // 1. Thử fallback trên Profile Google nếu có
+  const googleProf = candidateProfiles.find(p => p.provider !== 'xkiro');
+  if (googleProf) {
+    for (const fModel of FALLBACK_MODELS_CHAIN) {
+      state.requestStats.actualProfileName = googleProf.name;
+      state.requestStats.actualProvider = 'Google Gemini';
+      state.requestStats.actualModelName = fModel;
 
-  for (let mIdx = 0; mIdx < fallbackModelChain.length; mIdx++) {
-    const fModel = fallbackModelChain[mIdx];
+      const modelNotice = `⚠ Tất cả Profile đều quá tải ➔ Đang thử model dự phòng Google: ${fModel}`;
+      state.requestStats.fallbackNotice = modelNotice;
+      state.currentProcessStage = modelNotice;
+      updateResultBanner();
+      showToast(modelNotice, 'info');
 
-    state.requestStats.actualProfileName = fallbackProfile.name;
-    state.requestStats.actualModelName = fModel;
-
-    const modelNotice = `⚠ Tất cả Profile đều quá tải (503) ➔ Đang thử model dự phòng: ${fModel}`;
-    state.requestStats.fallbackNotice = modelNotice;
-    state.currentProcessStage = modelNotice;
-    updateResultBanner();
-    showToast(modelNotice, 'info');
-
-    // Thử lần 1 với fallback model
-    let mRes = await executeSingleGeminiHttp(fallbackProfile, fModel, images, prompt);
-    if (mRes.ok) {
-      state.requestStats.fallbackNotice = `✓ Hoàn tất bằng ${fallbackProfile.name} · ${fModel}`;
-      registerSuccessByKind(kind);
-      updateRequestStatsDisplay();
-      return mRes.data;
-    }
-
-    lastTransientError = mRes.errorMsg;
-
-    // Retry tối đa 1 lần với model fallback (backoff 1.5s)
-    if (mRes.isTransient) {
-      await delay(1500);
-      mRes = await executeSingleGeminiHttp(fallbackProfile, fModel, images, prompt);
+      let mRes = await executeSingleGeminiHttp(googleProf, fModel, images, prompt);
       if (mRes.ok) {
-        state.requestStats.fallbackNotice = `✓ Hoàn tất bằng ${fallbackProfile.name} · ${fModel}`;
+        state.requestStats.fallbackNotice = `✓ Hoàn tất bằng ${googleProf.name} · ${fModel}`;
         registerSuccessByKind(kind);
         updateRequestStatsDisplay();
         return mRes.data;
       }
-      lastTransientError = mRes.errorMsg;
-    }
 
-    // Nếu model này vẫn 503 -> chuyển sang model kế tiếp trong chuỗi (3.7 -> 3.6 -> 2.5)
+      if (mRes.isTransient) {
+        await delay(1500);
+        mRes = await executeSingleGeminiHttp(googleProf, fModel, images, prompt);
+        if (mRes.ok) {
+          state.requestStats.fallbackNotice = `✓ Hoàn tất bằng ${googleProf.name} · ${fModel}`;
+          registerSuccessByKind(kind);
+          updateRequestStatsDisplay();
+          return mRes.data;
+        }
+      }
+    }
   }
 
-  // Tất cả các Profile và tất cả các Model fallback đều quá tải
-  throw new Error(`Tất cả API Profile và model dự phòng (3.7, 3.6, 2.5) đều quá tải: ${lastTransientError || 'Lỗi 503'}`);
+  // 2. Thử fallback trên Profile xKiro nếu có
+  const xkiroProf = candidateProfiles.find(p => p.provider === 'xkiro');
+  if (xkiroProf) {
+    const xkiroChain = (state.cachedXKiroModels || DEFAULT_XKIRO_VISION_MODELS)
+      .map(m => m.id)
+      .filter(id => id !== xkiroProf.model)
+      .slice(0, 3);
+
+    for (const fModel of xkiroChain) {
+      state.requestStats.actualProfileName = xkiroProf.name;
+      state.requestStats.actualProvider = 'xKiro';
+      state.requestStats.actualModelName = fModel;
+
+      const modelNotice = `⚠ Tất cả Profile đều quá tải ➔ Đang thử model dự phòng xKiro: ${fModel}`;
+      state.requestStats.fallbackNotice = modelNotice;
+      state.currentProcessStage = modelNotice;
+      updateResultBanner();
+      showToast(modelNotice, 'info');
+
+      let mRes = await executeSingleXKiroHttp(xkiroProf, fModel, images, prompt);
+      if (mRes.ok) {
+        state.requestStats.fallbackNotice = `✓ Hoàn tất bằng ${xkiroProf.name} · ${fModel}`;
+        registerSuccessByKind(kind);
+        updateRequestStatsDisplay();
+        return mRes.data;
+      }
+
+      if (mRes.isTransient) {
+        await delay(1500);
+        mRes = await executeSingleXKiroHttp(xkiroProf, fModel, images, prompt);
+        if (mRes.ok) {
+          state.requestStats.fallbackNotice = `✓ Hoàn tất bằng ${xkiroProf.name} · ${fModel}`;
+          registerSuccessByKind(kind);
+          updateRequestStatsDisplay();
+          return mRes.data;
+        }
+      }
+    }
+  }
+
+  throw new Error(`Tất cả API Profile và model dự phòng đều quá tải: ${lastTransientError || 'Lỗi 503'}`);
 }
+
+// Giữ alias gọi tương thích ngược
+const callGeminiApiForProfile = callAIProfile;
 
 // ==========================================
 // 8. Output Normalization & Format Enforcer
@@ -2200,6 +2685,13 @@ function setupEventListeners() {
   elements.settingsModal.addEventListener('click', (e) => {
     if (e.target === elements.settingsModal) elements.settingsModal.classList.add('hidden');
   });
+
+  // Provider dropdown selector in profile form
+  if (elements.inputProfileProvider) {
+    elements.inputProfileProvider.addEventListener('change', () => {
+      onProviderChanged(elements.inputProfileProvider.value);
+    });
+  }
 
   // Profile Form Controls
   elements.btnAddNewProfile.addEventListener('click', openAddProfileForm);
