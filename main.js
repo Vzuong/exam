@@ -14,28 +14,20 @@
 // 1. Application State & Storage
 // ==========================================
 const DEFAULT_MODELS = [
-  { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash (Khuyên dùng - Ổn định nhất)' },
-  { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash (Tốc độ cao)' },
-  { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash' },
-  { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash (Mới - Dễ quá tải 503)' },
+  { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash (Mặc định - Khuyên dùng)' },
   { id: 'gemini-3.7-flash', name: 'Gemini 3.7 Flash' },
   { id: 'gemini-3.6-flash', name: 'Gemini 3.6 Flash' },
-  { id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash' }
+  { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' }
 ];
 
-function getFallbackModel(currentModel) {
-  const norm = (currentModel || '').toLowerCase().trim();
-  if (norm.includes('3.8') || norm.includes('3.7') || norm.includes('3.6') || norm.includes('3.5')) {
-    return 'gemini-2.5-flash';
-  }
-  if (norm.includes('2.5')) {
-    return 'gemini-2.0-flash';
-  }
-  if (norm.includes('2.0')) {
-    return 'gemini-1.5-flash';
-  }
-  return 'gemini-2.5-flash';
-}
+// Thứ tự Fallback Model chính xác khi tất cả API profile đều quá tải 503:
+// 1. gemini-3.7-flash -> 2. gemini-3.6-flash -> 3. gemini-2.5-flash
+// Tuyệt đối KHÔNG có c�c model 2.0 hay 1.5 cu!
+const FALLBACK_MODELS_CHAIN = [
+  'gemini-3.7-flash',
+  'gemini-3.6-flash',
+  'gemini-2.5-flash'
+];
 
 const state = {
   questions: [],
@@ -55,17 +47,22 @@ const state = {
   // Realtime Execution State
   currentProcessStage: 'Sẵn sàng',
 
-  // Request Statistics
+  // Request Statistics: Tách riêng Request thành công, Lần thử lỗi và Tổng lần gửi
   requestStats: {
-    run: 0,
+    successRequests: 0,
+    failedAttempts: 0,
+    totalAttempts: 0,
     lookupPass: 0,
     firstPass: 0,
     secondPass: 0,
     arbitration: 0,
     singleRechecks: 0,
-    retries: 0,
     batches: 0,
-    lastStatus: ''
+    lastStatus: '',
+    requestedProfileName: '',
+    actualProfileName: '',
+    actualModelName: '',
+    fallbackNotice: ''
   },
 
   maxImagesPerRequest: 8,
@@ -90,11 +87,16 @@ const elements = {
   btnModeLookup: document.getElementById('btnModeLookup'),
   btnModeCrossCheck: document.getElementById('btnModeCrossCheck'),
 
-  // Result Status Banner
+  // Result Status Banner & Fallback Tracking
   resultStatusBanner: document.getElementById('resultStatusBanner'),
   bannerModeText: document.getElementById('bannerModeText'),
   bannerRequestStats: document.getElementById('bannerRequestStats'),
   bannerProgressText: document.getElementById('bannerProgressText'),
+  bannerProfileRequested: document.getElementById('bannerProfileRequested'),
+  bannerProfileActual: document.getElementById('bannerProfileActual'),
+  bannerModelActual: document.getElementById('bannerModelActual'),
+  bannerFallbackAlert: document.getElementById('bannerFallbackAlert'),
+  bannerDisclaimer: document.getElementById('bannerDisclaimer'),
 
   // Upload & Actions
   dropZone: document.getElementById('dropZone'),
@@ -164,7 +166,7 @@ function createDefaultProfiles() {
       id: 'prof_' + Date.now() + '_1',
       name: 'Tài khoản chính',
       apiKey: '',
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.8-flash',
       thinkingLevel: 'high',
       status: 'untested', // 'ready' | 'rate_limited' | 'error' | 'untested'
       lastChecked: null,
@@ -175,7 +177,7 @@ function createDefaultProfiles() {
       id: 'prof_' + (Date.now() + 1) + '_2',
       name: 'Tài khoản phụ 1',
       apiKey: '',
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.8-flash',
       thinkingLevel: 'high',
       status: 'untested',
       lastChecked: null,
@@ -390,7 +392,7 @@ function openAddProfileForm() {
   elements.profileFormTitle.textContent = 'Thêm API Profile Mới';
   elements.inputProfileName.value = `Tài khoản phụ ${state.profiles.length}`;
   elements.inputProfileKey.value = '';
-  elements.inputProfileModel.value = 'gemini-2.5-flash';
+  elements.inputProfileModel.value = 'gemini-3.8-flash';
   elements.inputCustomModel.value = '';
   elements.inputCustomModel.classList.add('hidden');
   elements.inputProfileThinking.value = 'high';
@@ -433,7 +435,7 @@ function saveProfileFormData() {
   const name = (elements.inputProfileName.value || '').trim() || 'API Profile';
   const apiKey = (elements.inputProfileKey.value || '').trim();
   const selectedModel = elements.inputProfileModel.value === 'custom'
-    ? (elements.inputCustomModel.value || '').trim() || 'gemini-2.5-flash'
+    ? (elements.inputCustomModel.value || '').trim() || 'gemini-3.8-flash'
     : elements.inputProfileModel.value;
   const thinking = elements.inputProfileThinking.value || 'high';
   const editId = elements.editProfileId.value;
@@ -518,7 +520,7 @@ async function testApiKeyCall(apiKey) {
   const models = (data.models || [])
     .filter(m => m.supportedGenerationMethods?.includes('generateContent'))
     .map(m => m.name.replace(/^models\//, ''))
-    .filter(name => /gemini/i.test(name));
+    .filter(name => /gemini/i.test(name) && !/2\.0|1\.5/i.test(name));
 
   return models;
 }
@@ -600,13 +602,35 @@ function updateResultBanner() {
   elements.resultStatusBanner.classList.remove('hidden');
 
   if (elements.bannerModeText) {
-    elements.bannerModeText.textContent = state.mode === 'lookup' ? 'Chế độ: Chỉ tra' : 'Chế độ: Kiểm tra chéo';
+    elements.bannerModeText.textContent = state.mode === 'lookup' ? 'Chế độ: ⚡ Chỉ tra' : 'Chế độ: 🔎 Kiểm tra chéo';
   }
   if (elements.bannerProgressText) {
     elements.bannerProgressText.textContent = state.currentProcessStage;
   }
-  if (elements.bannerRequestStats) {
-    elements.bannerRequestStats.textContent = `Request thành công: ${state.requestStats.run}`;
+
+  // Cập nhật Profile Yêu Cầu, Profile Thực Tế, Model
+  if (elements.bannerProfileRequested) {
+    const defaultProf = getProfileById(state.mode === 'lookup' ? state.lookupProfileId : state.solverProfileId);
+    const reqName = state.requestStats.requestedProfileName || (defaultProf ? defaultProf.name : 'Tài khoản chính');
+    elements.bannerProfileRequested.textContent = `Profile yêu cầu: ${reqName}`;
+  }
+  if (elements.bannerProfileActual) {
+    const actName = state.requestStats.actualProfileName || state.requestStats.requestedProfileName || 'Chưa chạy';
+    elements.bannerProfileActual.textContent = `Profile thực tế: ${actName}`;
+  }
+  if (elements.bannerModelActual) {
+    const actModel = state.requestStats.actualModelName || 'gemini-3.8-flash';
+    elements.bannerModelActual.textContent = `Model: ${actModel}`;
+  }
+
+  // Cảnh báo Fallback khi xảy ra chuyển Profile hoặc chuyển Model
+  if (elements.bannerFallbackAlert) {
+    if (state.requestStats.fallbackNotice) {
+      elements.bannerFallbackAlert.classList.remove('hidden');
+      elements.bannerFallbackAlert.textContent = state.requestStats.fallbackNotice;
+    } else {
+      elements.bannerFallbackAlert.classList.add('hidden');
+    }
   }
 }
 
@@ -620,35 +644,42 @@ function updateRequestStatsDisplay() {
     breakdown = `Lượt 1: ${r.firstPass} • Lượt 2: ${r.secondPass}${r.arbitration ? ` • Phân xử: ${r.arbitration}` : ''}`;
   }
   if (r.singleRechecks) breakdown += ` • Câu lẻ: ${r.singleRechecks}`;
-  if (r.retries) breakdown += ` • Thử lại: ${r.retries}`;
 
-  const summary = `Request thành công: ${r.run} (${breakdown})`;
+  // Thống kê tách rõ 2 chỉ số: Request thành công & Lần thử lỗi + Tổng lần gửi (PHẦN 9, 10)
+  const summary = `Request thành công: ${r.successRequests} • Lần thử lỗi: ${r.failedAttempts} • Tổng lần gửi: ${r.totalAttempts}${breakdown ? ` (${breakdown})` : ''}`;
   if (elements.bannerRequestStats) elements.bannerRequestStats.textContent = summary;
 }
 
 function resetRequestStats() {
   state.requestStats = {
-    run: 0,
+    successRequests: 0,
+    failedAttempts: 0,
+    totalAttempts: 0,
     lookupPass: 0,
     firstPass: 0,
     secondPass: 0,
     arbitration: 0,
     singleRechecks: 0,
-    retries: 0,
     batches: 0,
-    lastStatus: ''
+    lastStatus: '',
+    requestedProfileName: '',
+    actualProfileName: '',
+    actualModelName: '',
+    fallbackNotice: ''
   };
   updateRequestStatsDisplay();
 }
 
-function registerRequest(kind, profileName = '') {
-  state.requestStats.run += 1;
+function registerSuccessByKind(kind) {
   if (kind === 'lookup') state.requestStats.lookupPass += 1;
   if (kind === 'first') state.requestStats.firstPass += 1;
   if (kind === 'second') state.requestStats.secondPass += 1;
   if (kind === 'arbitration') state.requestStats.arbitration += 1;
   if (kind === 'single') state.requestStats.singleRechecks += 1;
-  updateRequestStatsDisplay();
+}
+
+function registerRequest(kind) {
+  registerSuccessByKind(kind);
 }
 
 // ==========================================
@@ -796,23 +827,29 @@ function buildParts(images, prompt) {
 // ==========================================
 // 7. Robust Gemini API Transport
 // ==========================================
-async function callGeminiApiForProfile(profile, images, prompt, kind, retryCount = 0, fallbackCount = 0) {
-  if (!profile || !profile.apiKey) {
-    const pName = profile?.name || 'Tài khoản đã chọn';
-    throw new Error(`Profile "${pName}" chưa có API key. Vui lòng bấm biểu tượng Cài đặt để nhập key.`);
-  }
+// ==========================================
+// 7. Robust Gemini API Transport & Smart Fallback
+// ==========================================
 
-  const model = profile.model || 'gemini-2.5-flash';
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+/**
+ * Gửi duy nhất 1 HTTP request tới Google Generative Language API.
+ * Theo dõi chính xác từng lần gửi:
+ * - totalAttempts tăng 1 trước khi gửi
+ * - 200 OK -> successRequests tăng 1
+ * - Lỗi (503, 429, 400, 401, network...) -> failedAttempts tăng 1
+ */
+async function executeSingleGeminiHttp(profile, modelToUse, images, prompt) {
+  state.requestStats.totalAttempts += 1;
+  updateRequestStatsDisplay();
 
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelToUse)}:generateContent`;
   const generationConfig = {
     responseMimeType: 'application/json',
     responseSchema: getStructuredSchema(images.length),
     maxOutputTokens: Math.min(14000, Math.max(3000, 700 + images.length * 850))
   };
 
-  // Thinking Level logic (Section 2: Default High when Cross-Check)
-  if (supportsThinkingLevel(model)) {
+  if (supportsThinkingLevel(modelToUse)) {
     let level = profile.thinkingLevel || 'high';
     if (state.mode === 'cross_check' && level === 'low') {
       level = 'high';
@@ -825,8 +862,9 @@ async function callGeminiApiForProfile(profile, images, prompt, kind, retryCount
     generationConfig
   };
 
+  let response;
   try {
-    const response = await fetch(url, {
+    response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -834,94 +872,220 @@ async function callGeminiApiForProfile(profile, images, prompt, kind, retryCount
       },
       body: JSON.stringify(payload)
     });
-
-    const data = await response.json().catch(() => ({}));
-
-    if (!response.ok) {
-      const apiMsg = data.error?.message || response.statusText || 'Lỗi không xác định';
-
-      // 503 / High Demand: Tự động chuyển model dự phòng ngay lập tức (Không tốn quota vì Google chưa xử lý)
-      const isHighDemand503 = response.status === 503 || /high demand|temporarily unavailable|overloaded/i.test(apiMsg);
-      if (isHighDemand503 && fallbackCount < 2) {
-        const fallbackModel = getFallbackModel(model);
-        if (fallbackModel && fallbackModel !== model) {
-          showToast(`⚡ Model ${model} quá tải (503), tự động chuyển sang ${fallbackModel} để giải ngay...`, 'info');
-          state.requestStats.retries += 1;
-          updateRequestStatsDisplay();
-          const fallbackProfile = { ...profile, model: fallbackModel };
-          await delay(600);
-          return callGeminiApiForProfile(fallbackProfile, images, prompt, kind, 0, fallbackCount + 1);
-        }
-      }
-
-      // 429 = Rate limit/Quota: KHÔNG retry liên tục (Section 1 & 12)
-      if (response.status === 429) {
-        profile.status = 'rate_limited';
-        profile.lastError = 'API này đang chạm giới hạn sử dụng (429).';
-        saveProfiles();
-        throw new Error(`API "${profile.name}" đang chạm giới hạn sử dụng (429).`);
-      }
-
-      // 401 / 403 = Invalid key or no access
-      if (response.status === 401 || response.status === 403) {
-        profile.status = 'error';
-        profile.lastError = 'API key này không hoạt động hoặc không có quyền truy cập model đã chọn.';
-        saveProfiles();
-        throw new Error(`API key của "${profile.name}" không hoạt động hoặc không có quyền truy cập model đã chọn (${response.status}).`);
-      }
-
-      // 413 = Payload Too Large: Ném cờ để chia batch nhỏ hơn
-      if (response.status === 413) {
-        throw new Error('PAYLOAD_413_TOO_LARGE');
-      }
-
-      // 400 = Invalid request
-      if (response.status === 400) {
-        profile.status = 'error';
-        saveProfiles();
-        throw new Error(`Yêu cầu không hợp lệ cho "${profile.name}" (400): ${apiMsg}`);
-      }
-
-      // 500, 502, 504 = Lỗi dịch vụ tạm thời: Retry tối đa 1 lần có backoff
-      if ([500, 502, 504].includes(response.status) && retryCount < 1) {
-        state.requestStats.retries += 1;
-        updateRequestStatsDisplay();
-        const waitMs = 1200 + Math.floor(Math.random() * 400);
-        await delay(waitMs);
-        return callGeminiApiForProfile(profile, images, prompt, kind, retryCount + 1, fallbackCount);
-      }
-
-      throw new Error(`Google API (${response.status}): ${apiMsg}`);
-    }
-
-    const rawText = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
-    if (!rawText.trim()) {
-      throw new Error(`Gemini (${profile.name}) không trả về nội dung kết quả.`);
-    }
-
-    profile.status = 'ready';
-    profile.lastError = null;
-
-    // CHỈ ĐĂNG KÝ REQUEST KHI ĐÃ THÀNH CÔNG 200 OK (Tuyệt đối không đếm ảo khi bị lỗi mạng hoặc 503)
-    registerRequest(kind, profile.name);
-
-    return rawText.trim();
-  } catch (err) {
-    if (err.message === 'PAYLOAD_413_TOO_LARGE') throw err;
-
-    const msg = err?.message || '';
-    const isNetwork = /Failed to fetch|NetworkError|network|timeout|Load failed/i.test(msg);
-    const isDomainError = /API này đang chạm|không hoạt động|Yêu cầu không hợp lệ/i.test(msg);
-
-    if (isNetwork && !isDomainError && retryCount < 1) {
-      state.requestStats.retries += 1;
-      updateRequestStatsDisplay();
-      const waitMs = 1000;
-      await delay(waitMs);
-      return callGeminiApiForProfile(profile, images, prompt, kind, retryCount + 1, fallbackCount);
-    }
-    throw err;
+  } catch (netErr) {
+    state.requestStats.failedAttempts += 1;
+    updateRequestStatsDisplay();
+    return {
+      ok: false,
+      status: 0,
+      isTransient: true,
+      errorMsg: netErr.message || 'Lỗi kết nối mạng (Network Error)'
+    };
   }
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    state.requestStats.failedAttempts += 1;
+    updateRequestStatsDisplay();
+    const apiMsg = data.error?.message || response.statusText || 'Lỗi không xác định';
+
+    // 413 = Payload Too Large
+    if (response.status === 413) {
+      throw new Error('PAYLOAD_413_TOO_LARGE');
+    }
+
+    // 400 = Invalid request (sai prompt/payload) -> Báo lỗi ngay, không fallback vô ích (PHẦN 7)
+    if (response.status === 400) {
+      profile.status = 'error';
+      saveProfiles();
+      throw new Error(`Yêu cầu không hợp lệ cho "${profile.name}" (400): ${apiMsg}`);
+    }
+
+    // 401 / 403 = Invalid key hoặc không có quyền -> Báo lỗi, không retry vòng lặp (PHẦN 7)
+    if (response.status === 401 || response.status === 403) {
+      profile.status = 'error';
+      profile.lastError = 'API key không hoạt động hoặc không có quyền truy cập.';
+      saveProfiles();
+      throw new Error(`API key của "${profile.name}" không hợp lệ hoặc thiếu quyền (${response.status}): ${apiMsg}`);
+    }
+
+    // 429 = Rate limit / Quota -> Báo rate limit, KHÔNG retry vô hạn, KHÔNG chạy fallback 503 (PHẦN 7)
+    if (response.status === 429) {
+      profile.status = 'rate_limited';
+      profile.lastError = 'API này đang chạm giới hạn sử dụng (429).';
+      saveProfiles();
+      throw new Error(`API "${profile.name}" đang chạm giới hạn sử dụng (429).`);
+    }
+
+    // Các mã lỗi tạm thời có thể fallback: 503 (quá tải), 502 (bad gateway), 504 (gateway timeout), 500
+    const isTransient = [500, 502, 503, 504].includes(response.status) || /high demand|temporarily unavailable|overloaded/i.test(apiMsg);
+    return {
+      ok: false,
+      status: response.status,
+      isTransient,
+      errorMsg: `Google API (${response.status}): ${apiMsg}`
+    };
+  }
+
+  const rawText = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
+  if (!rawText.trim()) {
+    state.requestStats.failedAttempts += 1;
+    updateRequestStatsDisplay();
+    return {
+      ok: false,
+      status: response.status,
+      isTransient: true,
+      errorMsg: `Gemini (${profile.name}) không trả về nội dung kết quả.`
+    };
+  }
+
+  // HTTP 200 OK Thành công!
+  state.requestStats.successRequests += 1;
+  profile.status = 'ready';
+  profile.lastError = null;
+  return {
+    ok: true,
+    data: rawText.trim()
+  };
+}
+
+/**
+ * Điều phối gọi API theo cơ chế Fallback thông minh:
+ * 1. ƯU TIÊN PROFILE TRƯỚC: Thử Profile yêu cầu (model của profile đó, tối đa 1 retry với backoff 1.5–3s).
+ *    Nếu 503 -> Chuyển sang Profile B (dùng Profile B.apiKey và model của B, retry tối đa 1 lần).
+ *    Nếu 503 -> Chuyển tiếp Profile C...
+ * 2. CHỈ KHI TẤT CẢ PROFILE ĐỀU 503: Mới fallback model theo đúng thứ tự:
+ *    gemini-3.7-flash ➔ gemini-3.6-flash ➔ gemini-2.5-flash
+ *    (Tuyệt đối KHÔNG có c�c model 2.0 hay 1.5 cu).
+ * 3. Không thay đổi Profile người dùng đã chọn trong cài đặt hay dropdown.
+ */
+async function callGeminiApiForProfile(requestedProfile, images, prompt, kind) {
+  if (!requestedProfile || !requestedProfile.apiKey) {
+    const pName = requestedProfile?.name || 'Tài khoản đã chọn';
+    throw new Error(`Profile "${pName}" chưa có API key. Vui lòng bấm biểu tượng Cài đặt để nhập key.`);
+  }
+
+  // Khởi tạo thông tin hiển thị Profile ban đầu
+  state.requestStats.requestedProfileName = requestedProfile.name;
+  state.requestStats.actualProfileName = requestedProfile.name;
+  state.requestStats.actualModelName = requestedProfile.model || 'gemini-3.8-flash';
+  state.requestStats.fallbackNotice = '';
+  updateResultBanner();
+
+  // Tạo danh sách Candidate Profiles hợp lệ (Bắt đầu từ requestedProfile)
+  const candidateProfiles = [requestedProfile];
+  (state.profiles || []).forEach(p => {
+    if (p.id !== requestedProfile.id && p.apiKey && p.apiKey.trim() && p.status !== 'rate_limited') {
+      candidateProfiles.push(p);
+    }
+  });
+
+  let lastTransientError = null;
+
+  // ========================================================
+  // GIAI ĐOẠN 1: PROFILE DIVERSITY TRƯỚC (Thử lần lượt các API Profile)
+  // ========================================================
+  for (let i = 0; i < candidateProfiles.length; i++) {
+    const activeProf = candidateProfiles[i];
+    const activeModel = activeProf.model || 'gemini-3.8-flash';
+
+    state.requestStats.actualProfileName = activeProf.name;
+    state.requestStats.actualModelName = activeModel;
+
+    if (i > 0) {
+      const switchNotice = `⚠ Profile "${requestedProfile.name}" quá tải (503) ➔ Đã chuyển sang "${activeProf.name}" · ${activeModel}`;
+      state.requestStats.fallbackNotice = switchNotice;
+      state.currentProcessStage = switchNotice;
+      updateResultBanner();
+      showToast(switchNotice, 'info');
+    }
+
+    // Thử gọi lần 1 trên Profile này
+    let res = await executeSingleGeminiHttp(activeProf, activeModel, images, prompt);
+
+    if (res.ok) {
+      // Thành công!
+      if (i > 0) {
+        state.requestStats.fallbackNotice = `✓ Hoàn tất bằng ${activeProf.name} · ${activeModel}`;
+      }
+      registerSuccessByKind(kind);
+      updateRequestStatsDisplay();
+      return res.data;
+    }
+
+    lastTransientError = res.errorMsg;
+
+    // Nếu lỗi là transient (503, 502, 504, network...), cho phép retry tối đa 1 lần trên cùng Profile này (PHẦN 8)
+    if (res.isTransient) {
+      state.currentProcessStage = `${activeProf.name} (${activeModel}) quá tải (503) ➔ Đang thử lại (Retry 1/1)...`;
+      updateResultBanner();
+      await delay(1500 + Math.floor(Math.random() * 500));
+
+      res = await executeSingleGeminiHttp(activeProf, activeModel, images, prompt);
+      if (res.ok) {
+        if (i > 0) {
+          state.requestStats.fallbackNotice = `✓ Hoàn tất bằng ${activeProf.name} · ${activeModel}`;
+        }
+        registerSuccessByKind(kind);
+        updateRequestStatsDisplay();
+        return res.data;
+      }
+      lastTransientError = res.errorMsg;
+    }
+
+    // Thử cả 2 lần (lần đầu + 1 retry) trên Profile này đều thất bại -> chuyển sang Profile tiếp theo trong candidateProfiles
+  }
+
+  // ========================================================
+  // GIAI ĐOẠN 2: MODEL FALLBACK (Chỉ khi tất cả các Profile đều quá tải 503)
+  // Thứ tự fallback bắt buộc: gemini-3.7-flash ➔ gemini-3.6-flash ➔ gemini-2.5-flash
+  // ========================================================
+  const fallbackModelChain = FALLBACK_MODELS_CHAIN;
+  // Dùng profile ban đầu (hoặc profile đầu tiên hợp lệ) với API key thật của profile đó
+  const fallbackProfile = candidateProfiles[0] || requestedProfile;
+
+  for (let mIdx = 0; mIdx < fallbackModelChain.length; mIdx++) {
+    const fModel = fallbackModelChain[mIdx];
+
+    state.requestStats.actualProfileName = fallbackProfile.name;
+    state.requestStats.actualModelName = fModel;
+
+    const modelNotice = `⚠ Tất cả Profile đều quá tải (503) ➔ Đang thử model dự phòng: ${fModel}`;
+    state.requestStats.fallbackNotice = modelNotice;
+    state.currentProcessStage = modelNotice;
+    updateResultBanner();
+    showToast(modelNotice, 'info');
+
+    // Thử lần 1 với fallback model
+    let mRes = await executeSingleGeminiHttp(fallbackProfile, fModel, images, prompt);
+    if (mRes.ok) {
+      state.requestStats.fallbackNotice = `✓ Hoàn tất bằng ${fallbackProfile.name} · ${fModel}`;
+      registerSuccessByKind(kind);
+      updateRequestStatsDisplay();
+      return mRes.data;
+    }
+
+    lastTransientError = mRes.errorMsg;
+
+    // Retry tối đa 1 lần với model fallback (backoff 1.5s)
+    if (mRes.isTransient) {
+      await delay(1500);
+      mRes = await executeSingleGeminiHttp(fallbackProfile, fModel, images, prompt);
+      if (mRes.ok) {
+        state.requestStats.fallbackNotice = `✓ Hoàn tất bằng ${fallbackProfile.name} · ${fModel}`;
+        registerSuccessByKind(kind);
+        updateRequestStatsDisplay();
+        return mRes.data;
+      }
+      lastTransientError = mRes.errorMsg;
+    }
+
+    // Nếu model này vẫn 503 -> chuyển sang model kế tiếp trong chuỗi (3.7 -> 3.6 -> 2.5)
+  }
+
+  // Tất cả các Profile và tất cả các Model fallback đều quá tải
+  throw new Error(`Tất cả API Profile và model dự phòng (3.7, 3.6, 2.5) đều quá tải: ${lastTransientError || 'Lỗi 503'}`);
 }
 
 // ==========================================

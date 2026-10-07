@@ -1419,6 +1419,25 @@ body.gemini-theme {
   color: #93c5fd;
   font-weight: 600;
 }
+.banner-fallback-alert {
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  font-size: 0.78rem;
+  color: #fde68a;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1.4;
+  animation: bannerPop 0.25s ease-out;
+}
+.banner-disclaimer {
+  font-size: 0.7rem;
+  color: #64748b;
+  font-style: italic;
+  padding-top: 2px;
+}
 
 /* Agreement Badges on Question Cards */
 .card-agreement-badge {

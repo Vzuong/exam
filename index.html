@@ -171,12 +171,21 @@
             <span class="mode-tag-text" id="bannerModeText">Chế độ: ✓ Kiểm tra chéo</span>
           </div>
           <div class="banner-stats-pill" id="bannerRequestStats">
-            Request đã dùng: 0
+            Request thành công: 0 • Lần thử lỗi: 0 • Tổng lần gửi: 0
           </div>
         </div>
+        <div class="banner-profiles-row" id="bannerProfilesRow">
+          <span class="banner-profile-chip" id="bannerProfileRequested">Profile yêu cầu: Tài khoản chính</span>
+          <span class="banner-profile-chip" id="bannerProfileActual">Profile thực tế: Tài khoản chính</span>
+          <span class="banner-profile-chip" id="bannerModelActual">Model: Gemini 3.8 Flash</span>
+        </div>
+        <div class="banner-fallback-alert hidden" id="bannerFallbackAlert"></div>
         <div class="banner-progress-row" id="bannerProgressRow">
           <div class="progress-spinner-dot"></div>
           <span class="progress-text" id="bannerProgressText">Sẵn sàng</span>
+        </div>
+        <div class="banner-disclaimer" id="bannerDisclaimer">
+          * Đây là thống kê request của ứng dụng, không phải số quota thực tế do Google xác nhận.
         </div>
       </div>
 
@@ -266,13 +275,10 @@
             <div class="form-group col-6">
               <label for="inputProfileModel" class="form-label">Model Gemini:</label>
               <select id="inputProfileModel" class="form-select">
-                <option value="gemini-2.5-flash" selected>Gemini 2.5 Flash (Khuyên dùng - Ổn định nhất)</option>
-                <option value="gemini-2.0-flash">Gemini 2.0 Flash (Tốc độ cao)</option>
-                <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
-                <option value="gemini-3.8-flash">Gemini 3.8 Flash (Mới - Dễ quá tải 503)</option>
+                <option value="gemini-3.8-flash" selected>Gemini 3.8 Flash (Mặc định - Khuyên dùng)</option>
                 <option value="gemini-3.7-flash">Gemini 3.7 Flash</option>
                 <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
-                <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
+                <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
                 <option value="custom">Tự nhập model khác...</option>
               </select>
               <input type="text" id="inputCustomModel" class="form-input hidden" style="margin-top: 6px;" placeholder="Tên model (vd: gemini-3.8-flash)">
