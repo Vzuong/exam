@@ -22,7 +22,7 @@ const DEFAULT_MODELS = [
 
 // Thứ tự Fallback Model chính xác khi tất cả API profile đều quá tải 503:
 // 1. gemini-3.7-flash -> 2. gemini-3.6-flash -> 3. gemini-2.5-flash
-// Tuyệt đối KHÔNG có c�c model 2.0 hay 1.5 cu!
+// Tuyệt đối KHÔNG có c�c model 2.0 hay 1.5 cu!
 const FALLBACK_MODELS_CHAIN = [
   'gemini-3.7-flash',
   'gemini-3.6-flash',
@@ -99,6 +99,8 @@ const elements = {
   bannerDisclaimer: document.getElementById('bannerDisclaimer'),
 
   // Upload & Actions
+  cameraInput: document.getElementById('cameraInput'),
+  galleryInput: document.getElementById('galleryInput'),
   dropZone: document.getElementById('dropZone'),
   fileInput: document.getElementById('fileInput'),
   btnSolveAll: document.getElementById('btnSolveAll'),
@@ -957,7 +959,7 @@ async function executeSingleGeminiHttp(profile, modelToUse, images, prompt) {
  *    Nếu 503 -> Chuyển tiếp Profile C...
  * 2. CHỈ KHI TẤT CẢ PROFILE ĐỀU 503: Mới fallback model theo đúng thứ tự:
  *    gemini-3.7-flash ➔ gemini-3.6-flash ➔ gemini-2.5-flash
- *    (Tuyệt đối KHÔNG có c�c model 2.0 hay 1.5 cu).
+ *    (Tuyệt đối KHÔNG có c�c model 2.0 hay 1.5 cu).
  * 3. Không thay đổi Profile người dùng đã chọn trong cài đặt hay dropdown.
  */
 async function callGeminiApiForProfile(requestedProfile, images, prompt, kind) {
@@ -2239,26 +2241,32 @@ function setupEventListeners() {
     if (e.target === elements.imageZoomModal) elements.imageZoomModal.classList.add('hidden');
   });
 
-  // Drag and Drop Upload
-  elements.dropZone.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    elements.dropZone.classList.add('dragover');
-  });
-  elements.dropZone.addEventListener('dragleave', () => elements.dropZone.classList.remove('dragover'));
-  elements.dropZone.addEventListener('drop', (e) => {
-    e.preventDefault();
-    elements.dropZone.classList.remove('dragover');
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      handleFiles(Array.from(e.dataTransfer.files));
-    }
-  });
-
-  elements.fileInput.addEventListener('change', (e) => {
+  // Camera, Gallery & File Input Listeners
+  const onIncomingFilesChange = (e) => {
     if (e.target.files && e.target.files.length > 0) {
       handleFiles(Array.from(e.target.files));
-      elements.fileInput.value = '';
+      e.target.value = '';
     }
-  });
+  };
+  if (elements.cameraInput) elements.cameraInput.addEventListener('change', onIncomingFilesChange);
+  if (elements.galleryInput) elements.galleryInput.addEventListener('change', onIncomingFilesChange);
+  if (elements.fileInput) elements.fileInput.addEventListener('change', onIncomingFilesChange);
+
+  // Drag and Drop Upload (nếu có dropZone trên giao diện)
+  if (elements.dropZone) {
+    elements.dropZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      elements.dropZone.classList.add('dragover');
+    });
+    elements.dropZone.addEventListener('dragleave', () => elements.dropZone.classList.remove('dragover'));
+    elements.dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      elements.dropZone.classList.remove('dragover');
+      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        handleFiles(Array.from(e.dataTransfer.files));
+      }
+    });
+  }
 
   // Clipboard Paste (Ctrl + V)
   document.addEventListener('paste', (e) => {
