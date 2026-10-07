@@ -65,7 +65,8 @@ const state = {
     fallbackNotice: ''
   },
 
-  maxImagesPerRequest: 8,
+  maxImages: 15,
+  maxImagesPerRequest: 15,
   maxInlineRequestBytes: 18_500_000,
   promptPreset: 'multiple_choice_only',
 
@@ -1222,7 +1223,7 @@ function recompressImage(q, maxDimension, quality) {
 }
 
 async function splitImagesIntoBatches(images) {
-  const maxPerBatch = Math.min(state.maxImagesPerRequest || 8, 8);
+  const maxPerBatch = state.maxImagesPerRequest || 15;
   const batches = [];
   let current = [];
 
@@ -1820,15 +1821,16 @@ async function handleFiles(files, isPasted = false) {
     return;
   }
 
-  const remainingSlots = state.maxImagesPerRequest - state.questions.length;
+  const maxLimit = state.maxImages || state.maxImagesPerRequest || 15;
+  const remainingSlots = maxLimit - state.questions.length;
   if (remainingSlots <= 0) {
-    showToast(`Đã đủ ${state.maxImagesPerRequest} ảnh. Vui lòng giải hoặc xóa bớt trước.`, 'error');
+    showToast(`Đã đủ ${maxLimit} ảnh. Vui lòng giải hoặc xóa bớt trước.`, 'error');
     return;
   }
 
   const acceptedFiles = imageFiles.slice(0, remainingSlots);
   if (imageFiles.length > acceptedFiles.length) {
-    showToast(`Tối đa ${state.maxImagesPerRequest} ảnh/lần. Đã nhận ${acceptedFiles.length} ảnh.`, 'error');
+    showToast(`Tối đa ${maxLimit} ảnh/lần. Đã nhận ${acceptedFiles.length} ảnh.`, 'error');
   } else {
     showToast(`Đang xử lý ${acceptedFiles.length} ảnh...`);
   }
