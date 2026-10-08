@@ -92,7 +92,7 @@ const state = {
   // Realtime Execution State
   currentProcessStage: 'Sẵn sàng',
 
-  // Cache danh sách model xKiro từ GET https://api.xkiro.com/v1/models
+  // Cache danh sách model xKiro từ GET /api/xkiro/models
   cachedXKiroModels: null,
 
   // Request Statistics: Tách riêng Request thành công, Lần thử lỗi và Tổng lần gửi
@@ -470,7 +470,7 @@ async function fetchXKiroVisionModels() {
 
   let res;
   try {
-    res = await fetch('https://api.xkiro.com/v1/models', {
+    res = await fetch('/api/xkiro/models', {
       method: 'GET',
       headers: {
         'Accept': 'application/json'
@@ -481,19 +481,22 @@ async function fetchXKiroVisionModels() {
   }
 
   if (!res.ok) {
-    throw new Error(`xKiro catalog trả HTTP ${res.status}.`);
+    let errJson;
+    try { errJson = await res.json(); } catch (_) {}
+    const msg = errJson?.error?.message || `xKiro catalog trả HTTP ${res.status}.`;
+    throw new Error(msg);
   }
 
   let data;
   try {
     data = await res.json();
   } catch (_) {
-    throw new Error('Không thể kết nối tới catalog xKiro (GET /v1/models).');
+    throw new Error('Không thể kết nối tới catalog xKiro (GET /api/xkiro/models).');
   }
 
   const list = data?.data;
   if (!Array.isArray(list)) {
-    throw new Error('Không thể kết nối tới catalog xKiro (GET /v1/models).');
+    throw new Error('Không thể kết nối tới catalog xKiro (GET /api/xkiro/models).');
   }
 
   // Lọc model dùng cho vision theo yêu cầu FastExam AI:
@@ -581,7 +584,7 @@ async function onProviderChanged(provider, preserveModel = '') {
   }
   if (elements.hintProfileKey) {
     elements.hintProfileKey.textContent = isXKiro
-      ? 'Key chỉ lưu trong trình duyệt của bạn (BYOK) và dùng trực tiếp để gọi xKiro API (https://api.xkiro.com/v1).'
+      ? 'Key chỉ lưu trong trình duyệt của bạn (BYOK) và chuyển qua proxy server an toàn (/api/xkiro/chat).'
       : 'Key chỉ lưu trong trình duyệt của bạn (BYOK) và dùng trực tiếp để gọi Google API.';
   }
 
@@ -832,21 +835,21 @@ async function testXKiroApiKeyCall(apiKey, selectedModel = '') {
   // 1. Kiểm tra catalog và vision models
   const visionModels = await fetchXKiroVisionModels();
 
-  // 2. Gửi probe request nhỏ tới POST /v1/chat/completions để xác nhận key hợp lệ và model hoạt động
+  // 2. Gửi probe request nhỏ tới POST /api/xkiro/chat để xác nhận key hợp lệ và model hoạt động
   const probeModel = (selectedModel && selectedModel !== 'custom') ? selectedModel : getBestXKiroDefaultModel(visionModels);
-  const probeResp = await fetch('https://api.xkiro.com/v1/chat/completions', {
+  const probeResp = await fetch('/api/xkiro/chat', {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/json',
-      'Authorization': 'Bearer ' + apiKey.trim()
+      'Content-Type': 'application/json'
     },
     body: JSON.stringify({
+      apiKey: apiKey.trim(),
       model: probeModel,
       messages: [{ role: 'user', content: '1+1=' }],
-      max_tokens: 3
+      stream: false
     })
   }).catch(() => {
-    throw new Error('Không thể kết nối tới xKiro endpoint (/v1/chat/completions). Kiểm tra mạng.');
+    throw new Error('Không thể kết nối tới xKiro endpoint (/api/xkiro/chat). Kiểm tra mạng.');
   });
 
   if (probeResp.status === 401) {
@@ -1431,7 +1434,7 @@ async function readSSEStreamContent(response) {
 }
 
 /**
- * Gửi HTTP request tới xKiro API (https://api.xkiro.com/v1/chat/completions)
+ * Gửi HTTP request tới xKiro API qua proxy (/api/xkiro/chat)
  * Tuân thủ chuẩn OpenAI-compatible Chat Completions có hỗ trợ Vision qua mảng Content
  * Kích hoạt stream: true để bypass giới hạn 95s blocking timeout của xKiro
  */
@@ -1439,7 +1442,7 @@ async function executeSingleXKiroHttp(profile, modelToUse, images, prompt) {
   state.requestStats.totalAttempts += 1;
   updateRequestStatsDisplay();
 
-  const url = 'https://api.xkiro.com/v1/chat/completions';
+  const url = '/api/xkiro/chat';
 
   // Định dạng Content Array chuẩn OpenAI-compatible vision:
   // Text yêu cầu + từng ảnh với format data:image/jpeg;base64,...
@@ -1461,6 +1464,7 @@ async function executeSingleXKiroHttp(profile, modelToUse, images, prompt) {
   });
 
   const payload = {
+    apiKey: profile.apiKey.trim(),
     model: modelToUse, // Giữ đầy đủ vendor/model prefix, ví dụ openai/gpt-6.1-sol
     stream: true,      // Kích hoạt SSE streaming để bypass timeout 95s của xKiro
     messages: [
@@ -1486,8 +1490,7 @@ async function executeSingleXKiroHttp(profile, modelToUse, images, prompt) {
     response = await fetch(url, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + profile.apiKey.trim()
+        'Content-Type': 'application/json'
       },
       body: JSON.stringify(payload)
     });
